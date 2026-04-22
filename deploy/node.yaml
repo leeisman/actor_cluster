@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: actor-node
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: actor-node
+  template:
+    metadata:
+      labels:
+        app: actor-node
+    spec:
+      terminationGracePeriodSeconds: 45 # 延長優雅停機，給予 Actor 充足時間 Drain Queue 落檔
+      containers:
+      - name: node
+        image: actor:latest
+        imagePullPolicy: IfNotPresent
+        args: ["-port=:50051", "-etcd=etcd-client:2379", "-cassandra=cassandra-0.cassandra-headless.default.svc.cluster.local:9042"]
+        env:
+        - name: POD_IP # 注入核心：利用 CNI 真實 IP 註冊給 etcd 進行 1024 槽位路由
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        resources:
+          limits:
+            memory: "2Gi"
+          requests:
+            memory: "512Mi"
+        ports:
+        - containerPort: 50051

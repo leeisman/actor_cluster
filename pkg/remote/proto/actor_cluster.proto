@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package remote;
+
+option go_package = "github.com/frankieli/actor_cluster/pkg/remote/pb";
+
+message RemoteEnvelope {
+  int32 tenant_id = 1;
+  int64 uid = 2;
+  string tx_id = 3;
+  uint64 request_id = 4; // transport correlation key; must be cluster-global unique
+  int32 op_code = 5;
+  bytes payload = 6;
+  int64 deadline_unix_ms = 7;
+}
+
+message RemoteResult {
+  int32 tenant_id = 1;
+  int64 uid = 2;
+  string tx_id = 3;
+  uint64 request_id = 4; // mirrors the globally unique request_id from request
+  int32 op_code = 5;
+  bool success = 6;
+  string error_code = 7;
+  string error_msg = 8;
+  bytes payload = 9;
+}
+
+message BatchRequest {
+  repeated RemoteEnvelope envelopes = 1;
+}
+
+message BatchResponse {
+  repeated RemoteResult results = 1;
+}
+
+service ActorService {
+  rpc StreamMessages(stream BatchRequest) returns (stream BatchResponse);
+}

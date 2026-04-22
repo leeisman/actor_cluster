@@ -1,0 +1,8 @@
+.DS_Store
+.idea/
+.gocache/
+
+*.out
+*.log
+
+docs/archive/*.tar.gz

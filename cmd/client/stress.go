@@ -42,6 +42,16 @@ type StressEngine struct {
 	done       chan struct{}
 	running    atomic.Bool
 	currentTPS atomic.Uint64
+	baseline   metricsBaseline
+}
+
+type metricsBaseline struct {
+	sent           uint64
+	success        uint64
+	errors         uint64
+	latencyNanos   uint64
+	latencySamples uint64
+	errorBreakdown map[string]uint64
 }
 
 func runStressCommand(args []string) error {
@@ -109,6 +119,7 @@ func (e *StressEngine) Start(cfg stressConfig) error {
 	e.done = done
 	e.currentTPS.Store(0)
 	e.running.Store(true)
+	e.baseline = metricsBaseline{}
 
 	go func() {
 		defer close(done)
@@ -147,15 +158,42 @@ func (e *StressEngine) Stop() {
 }
 
 func (e *StressEngine) Status() stressStatus {
-	return stressStatus{
+	e.mu.Lock()
+	baseline := e.baseline
+	e.mu.Unlock()
+
+	currSent := e.router.reqSent.Load()
+	currSuccess := e.router.respRecv.Load()
+	currErrors := e.router.errCount.Load()
+	currLatencyNanos := e.router.latencyNanos.Load()
+	currLatencySamples := e.router.latencySamples.Load()
+	currBreakdown := e.router.ErrorBreakdownMap()
+
+	status := stressStatus{
 		IsRunning:      e.running.Load(),
-		TotalSent:      e.router.reqSent.Load(),
-		TotalSuccess:   e.router.respRecv.Load(),
-		TotalErrors:    e.router.errCount.Load(),
+		TotalSent:      subtractWithFloor(currSent, baseline.sent),
+		TotalSuccess:   subtractWithFloor(currSuccess, baseline.success),
+		TotalErrors:    subtractWithFloor(currErrors, baseline.errors),
 		CurrentTPS:     e.currentTPS.Load(),
-		AvgLatencyMS:   float64(e.router.AvgLatency()) / float64(time.Millisecond),
-		ErrorBreakdown: e.router.ErrorBreakdownMap(),
+		AvgLatencyMS:   diffAvgLatency(currLatencyNanos, currLatencySamples, baseline),
+		ErrorBreakdown: diffErrorBreakdown(currBreakdown, baseline.errorBreakdown),
 	}
+	return status
+}
+
+func (e *StressEngine) ResetMetrics() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.baseline = metricsBaseline{
+		sent:           e.router.reqSent.Load(),
+		success:        e.router.respRecv.Load(),
+		errors:         e.router.errCount.Load(),
+		latencyNanos:   e.router.latencyNanos.Load(),
+		latencySamples: e.router.latencySamples.Load(),
+		errorBreakdown: e.router.ErrorBreakdownMap(),
+	}
+	e.currentTPS.Store(0)
 }
 
 func runStressGenerators(ctx context.Context, router *Router, cfg stressConfig) {
@@ -243,4 +281,32 @@ func startMetricsReporter(ctx context.Context, router *Router, onTPS func(uint64
 	return func() {
 		close(stop)
 	}
+}
+
+func subtractWithFloor(curr, base uint64) uint64 {
+	if curr < base {
+		return 0
+	}
+	return curr - base
+}
+
+func diffAvgLatency(currNanos, currSamples uint64, baseline metricsBaseline) float64 {
+	nanos := subtractWithFloor(currNanos, baseline.latencyNanos)
+	samples := subtractWithFloor(currSamples, baseline.latencySamples)
+	if samples == 0 {
+		return 0
+	}
+	return float64(time.Duration(nanos/samples)) / float64(time.Millisecond)
+}
+
+func diffErrorBreakdown(curr, base map[string]uint64) map[string]uint64 {
+	out := make(map[string]uint64)
+	for key, value := range curr {
+		baseValue := base[key]
+		if value <= baseValue {
+			continue
+		}
+		out[key] = value - baseValue
+	}
+	return out
 }

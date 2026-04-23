@@ -84,6 +84,7 @@ func runServeCommand(args []string) error {
 	mux.HandleFunc("/api/stress/start", srv.handleStressStart)
 	mux.HandleFunc("/api/stress/stop", srv.handleStressStop)
 	mux.HandleFunc("/api/stress/status", srv.handleStressStatus)
+	mux.HandleFunc("/api/stress/reset", srv.handleStressReset)
 	mux.HandleFunc("/api/wallet/execute", srv.handleExecute)
 	mux.HandleFunc("/api/wallet/balance/", srv.handleBalance)
 	mux.HandleFunc("/healthz", handleHealth)
@@ -177,6 +178,18 @@ func (s *gatewayServer) handleStressStatus(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, s.engine.Status())
 }
 
+func (s *gatewayServer) handleStressReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.engine.ResetMetrics()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"reset":  true,
+		"status": s.engine.Status(),
+	})
+}
+
 func (s *gatewayServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -213,7 +226,7 @@ func (s *gatewayServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]any{
 		"success":    res.Success,
-		"request_id": reqID,
+		"request_id": strconv.FormatUint(reqID, 10),
 		"uid":        req.UID,
 		"amount":     req.Amount,
 		"error_code": res.ErrorCode,
@@ -267,11 +280,14 @@ func (s *gatewayServer) computeBalance(ctx context.Context, tenantID int32, uid 
 	}
 
 	balance := snapshotBalance
-	eventCQL := `SELECT delta_amount FROM wallet_events WHERE tenant_id = ? AND uid = ? AND version > ? ORDER BY version ASC`
+	finalVersion := lastVersion
+	eventCQL := `SELECT version, delta_amount FROM wallet_events WHERE tenant_id = ? AND uid = ? AND version > ? ORDER BY version ASC`
 	err = s.store.Query(ctx, eventCQL, []any{tenantID, uid, lastVersion}, func(scanner persistence.Scanner) error {
+		var version int64
 		var delta int64
-		for scanner.Scan(&delta) {
+		for scanner.Scan(&version, &delta) {
 			balance += delta
+			finalVersion = version
 		}
 		return nil
 	})
@@ -279,7 +295,7 @@ func (s *gatewayServer) computeBalance(ctx context.Context, tenantID int32, uid 
 		return 0, 0, fmt.Errorf("load events failed: %w", err)
 	}
 
-	return balance, lastVersion, nil
+	return balance, finalVersion, nil
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -474,6 +490,7 @@ const gatewayHTML = `<!doctype html>
           <label>Duration (sec) <input type="number" name="duration_sec" min="1" value="30"></label>
           <button type="submit">Launch Load Test</button>
           <button type="button" class="stop" id="stopBtn">Stop</button>
+          <button type="button" id="resetBtn">Clear Metrics</button>
         </form>
       </section>
     </div>
@@ -555,6 +572,12 @@ const gatewayHTML = `<!doctype html>
     document.getElementById("stopBtn").addEventListener("click", async () => {
       const res = await fetch("/api/stress/stop", {method: "POST"});
       appendLog("stress.stop", await res.json());
+      refreshStatus();
+    });
+
+    document.getElementById("resetBtn").addEventListener("click", async () => {
+      const res = await fetch("/api/stress/reset", {method: "POST"});
+      appendLog("metrics.reset", await res.json());
       refreshStatus();
     });
 

@@ -215,7 +215,7 @@ Response 範例：
 ```json
 {
   "success": true,
-  "request_id": 281474976710657,
+  "request_id": "281474976710657",
   "uid": 1,
   "amount": 100,
   "error_code": "",
@@ -223,6 +223,9 @@ Response 範例：
   "balance": 1500
 }
 ```
+
+注意：
+- `request_id` 雖然在系統內是 `uint64`，但對外 HTTP JSON 應以 **string** 回傳，避免前端 JavaScript 因超過 `Number` 安全整數範圍而失去精度。
 
 狀態碼：
 
@@ -243,8 +246,8 @@ debug / 對帳用途，不走 actor write path。
 流程：
 
 1. `SELECT balance, last_version FROM wallet_snapshots WHERE tenant_id = ? AND uid = ?`
-2. `SELECT delta_amount FROM wallet_events WHERE tenant_id = ? AND uid = ? AND version > ? ORDER BY version ASC`
-3. 在 gateway 記憶體中累加 delta
+2. `SELECT version, delta_amount FROM wallet_events WHERE tenant_id = ? AND uid = ? AND version > ? ORDER BY version ASC`
+3. 在 gateway 記憶體中累加 delta，並以**最後一筆 event 的 version** 更新最終版本號；若沒有增量 event，才退回 snapshot 的 `last_version`
 
 Response 範例：
 
@@ -300,6 +303,27 @@ Request:
 }
 ```
 
+### 5.6 `POST /api/stress/reset`
+
+用途：清除 dashboard 上目前的累積 metrics，方便比較下一批測試。
+
+這個 reset 的語意是：
+
+- 不停止目前的 gRPC stream
+- 不清除 Cassandra 資料
+- 不重建 `Router`
+- 只把 dashboard 顯示用的 metrics baseline 重設為「現在這一刻」
+
+因此 reset 後重新歸零的是：
+
+- `total_sent`
+- `total_success`
+- `total_errors`
+- `avg_latency_ms`
+- `error_breakdown`
+
+而不是整個 transport runtime。
+
 ## 6. Web UI
 
 `serve` 模式在 `/` 提供內嵌單檔 dashboard。
@@ -309,6 +333,7 @@ Request:
 - Manual execute 表單
 - Balance query 表單
 - Stress start / stop 控制
+- Clear metrics 按鈕
 - Live metrics
 - Event log
 

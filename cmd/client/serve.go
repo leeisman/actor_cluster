@@ -514,10 +514,18 @@ const gatewayHTML = `<!doctype html>
   <script>
     const logNode = document.getElementById("log");
     const stateNode = document.getElementById("runState");
+    const executeUIDInput = document.querySelector('#executeForm input[name="uid"]');
+    const balanceUIDInput = document.querySelector('#balanceForm input[name="uid"]');
 
     function appendLog(title, payload) {
       const line = "[" + new Date().toLocaleTimeString() + "] " + title + "\n" + JSON.stringify(payload, null, 2) + "\n\n";
       logNode.textContent = line + logNode.textContent;
+    }
+
+    function syncBalanceUID(force = false) {
+      if (force || balanceUIDInput.value === "" || balanceUIDInput.value === "1") {
+        balanceUIDInput.value = executeUIDInput.value;
+      }
     }
 
     async function refreshStatus() {
@@ -541,7 +549,9 @@ const gatewayHTML = `<!doctype html>
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(body),
       });
-      appendLog("execute", await res.json());
+      const data = await res.json();
+      appendLog("execute", data);
+      balanceUIDInput.value = String(body.uid);
       refreshStatus();
     });
 
@@ -581,6 +591,8 @@ const gatewayHTML = `<!doctype html>
       refreshStatus();
     });
 
+    executeUIDInput.addEventListener("input", () => syncBalanceUID());
+    syncBalanceUID(true);
     refreshStatus();
     setInterval(refreshStatus, 1000);
   </script>

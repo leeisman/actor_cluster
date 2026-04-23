@@ -112,7 +112,7 @@ Node
 
 Requirements:
 
-- Go 1.24+
+- Go 1.25+（與 `go.mod` 一致）
 - Docker
 - Kind
 - kubectl

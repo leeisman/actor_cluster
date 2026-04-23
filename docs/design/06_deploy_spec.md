@@ -41,39 +41,104 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 
 ## 4. 自動化建置流與操作指南 (Bootstrap Workflow & Operations)
 
-我們已經將所有冗長的 `kubectl` 與 `docker` 原生指令封裝至專案根目錄的 `Makefile` 中。開發者日常操作與壓測的標準作業流程 (SOP) 如下：
+我們已經將所有冗長的 `kubectl`、`kind` 與 `docker` 原生指令封裝至專案根目錄的 `Makefile` 中。現行標準流程如下。
 
-### 階段一：架設地基 (Infrastructure)
-1. **`make kind-up`**:
-   - **用途**: 根據 `deploy/infra/kind-config.yaml` 啟動包含 1-master 與 2-worker 的本地 K8s 虛擬叢集。這是一切部署的前置基底。
-2. **`make deploy-infra`**:
-   - **用途**: 將 etcd 與 Cassandra 啟動。
-   - **確認方式**: 執行 `kubectl get pods -w`，等待這兩個元件狀態皆轉為 `Running`。
-   - **初始化 DB**: 待 Cassandra 啟動完畢後，執行 `make init-db` 建立 Schema。
+### 4.1 狀態檢查
 
-### 階段二：單機極速開發 (Hybrid Mode)
-如果只想在 Mac 上用 Goland/VSCode 寫 Go code 測邏輯：
-3. **`make port-forward`**:
-   - **用途**: 會在背景啟動 K8s 內網穿透，將 K8s 內的 `etcd (2379)` 與 `Cassandra (9042)` 掛載到 Mac 本機 `127.0.0.1`。
-   - **操作**: 開著此 Terminal 不要關（可按 Ctrl+C 中止），另開新視窗直接執行 `go run cmd/node/main.go` 即可享有原生 Debug 的無敵快感。
+1. **`make status-kind`**：
+   - **用途**：列出目前 kind cluster、nodes、pods、ingress 與 gateway 部署狀態。
+   - **適用時機**：先確認現在缺的是 `ingress-nginx`、`actor-gateway`，還是整個 cluster 根本不存在。
 
-### 階段三：實兵跨節點壓測 (Distributed Load Test)
-準備要挑戰高 TPS 與測試 `(TenantID, UID)` 的 etcd 路由（**`deploy/node.yaml` 預設 `replicas: 2`**，與下述兩台節點敘述一致；若要 3 台可改 replicas 或另擴展）：
+### 4.2 重建 kind（必要時）
 
-4. **`make images`** 或 **`make docker-build`**:
-   - **`make images`**：只在本機 Docker 建出 `actor:latest`（node）與 `actor-client:latest`（client），**不**載入 Kind。
-   - **`make docker-build`**：等同 `images` + 對叢集 **`actor-cluster` 執行 `kind load`**，並執行 **`make verify-kind-images`**（在節點上 `crictl` 可見兩顆 image 即為載入成功）。
+2. **`make recreate-kind`**：
+   - **用途**：刪掉舊 cluster，再依 `deploy/infra/kind-config.yaml` 重建。
+   - **為什麼需要**：`deploy/infra/kind-config.yaml` 現在已要求 control-plane 具備 `80/443` host port mapping，供 ingress 對外暴露 web gateway。若 cluster 是在這次設定之前建立的，**舊 cluster 不會自動補上 port mapping**，必須重建。
 
-5. **`make deploy-node`**:
-   - **用途**: `kubectl apply -f deploy/node.yaml`；**若映像 tag 未變（如仍為 `actor:latest`）**，`apply` 常顯示 `unchanged`，**不會**換掉已跑舊二進位的 Pod。改完 code 已 `kind load` 新層後，需 **`make redeploy-node`** 或一條龍 **`make refresh-nodes`**（= `docker-build` + `redeploy-node`）強制滾動重啟。
+### 4.3 完整一條龍流程
 
-6. **`make load-test`**:
-   - **用途**: 啟動大屠殺大砲 `cmd/client`，它會在 K8s 內網掛單執行。
-   - **觀測數據**: 使用 `kubectl logs -l app=load-generator -f` 去看無鎖 Reporter 吐出的即時 TPS 跑馬燈。
+3. **`make bootstrap-all`**：
+   - **用途**：從零建立完整本地環境。
+   - **內含順序**：
+     1. `recreate-kind`
+     2. `deploy-infra`
+     3. `wait-infra`
+     4. `init-db`
+     5. `install-ingress`
+     6. `docker-build`
+     7. `deploy-node`
+     8. `deploy-gateway`
+     9. `status-kind`
 
-### 階段四：關門打掃
-7. **`make clean`**:
-   - **用途**: 直接刪除整個 `kind` 叢集與其所有掛載硬碟，完全不留垃圾，下一秒重新 `make kind-up` 就是全新世界。
+這是目前最推薦的「統一步驟」。
+
+### 4.4 Gateway 路徑
+
+4. **`make install-ingress`**：
+   - **用途**：安裝 `ingress-nginx` controller（kind provider manifest）。
+   - **結果**：叢集可接收 `Ingress` 資源，將 `http://localhost/` 路由到 cluster 內的 web gateway service。
+   - **固定規則**：安裝後 Makefile 會立即把 `ingress-nginx-controller` 固定到 `actor-cluster-control-plane`。原因是本專案的 `80/443` host port mapping 只綁在 kind control-plane container；若 controller 被 scheduler 放到 worker，瀏覽器雖然可以連到本機 port 80，但實際上不會命中 ingress controller。
+
+5. **`make deploy-gateway`**：
+   - **用途**：部署 `actor-gateway` 的 `Deployment + Service + Ingress`。
+   - **對外入口**：`http://localhost/`
+
+6. **`make redeploy-gateway`**：
+   - **用途**：在已經 `kind load` 新 `actor-client:latest` 之後，滾動重啟 gateway deployment 讓新 binary 生效。
+
+7. **`make bootstrap-gateway`**：
+   - **用途**：對已存在的 cluster 做 gateway 路徑的一條龍部署。
+   - **內含順序**：
+     1. `install-ingress`
+     2. `docker-build`
+     3. `deploy-gateway`
+
+### 4.5 Node 與壓測路徑
+
+8. **`make deploy-infra`**：
+   - **用途**：啟動 etcd 與 Cassandra。
+   - **確認方式**：可用 `kubectl get pods -w` 或 `make status-kind`。
+
+9. **`make init-db`**：
+   - **用途**：建立 `wallet` keyspace 與 `wallet_events`, `wallet_snapshots` schema。
+   - **穩定性**：Makefile 會先等待 Cassandra 的 native transport 可被 `cqlsh` 連上，再真正執行 schema 初始化，避免 Cassandra 剛完成 rollout 但 `9042` 尚未開始接受連線時的初始化失敗。
+
+10. **`make images`** / **`make docker-build`**：
+   - **`make images`**：只在本機 Docker 建出 `actor:latest`（node）與 `actor-client:latest`（client），**不**載入 kind。
+   - **`make docker-build`**：等同 `images` + 對叢集 **`actor-cluster` 執行 `kind load`**，並執行 **`make verify-kind-images`**。
+
+11. **`make deploy-node`**：
+   - **用途**：部署 Actor Node。
+   - **補充**：若 image tag 未變（仍為 `actor:latest`），改完 code 後需額外執行 **`make redeploy-node`** 或 **`make refresh-nodes`** 才會真的換成新 binary。
+
+12. **`make load-test`**：
+   - **用途**：以 K8s Job 方式啟動 `cmd/client stress ...`，做真實內網壓測。
+
+### 4.6 單機極速開發 (Hybrid Mode)
+
+13. **`make port-forward`**：
+   - **用途**：將 K8s 內的 etcd / Cassandra 掛到本機 `127.0.0.1`，方便直接 `go run ./cmd/node` 或 `go run ./cmd/client serve`。
+
+### 4.7 清理
+
+14. **`make clean`**：
+   - **用途**：刪除整個 kind cluster。
+
+### 4.8 避坑紀錄
+
+1. **舊 cluster 必須重建**：
+   - `deploy/infra/kind-config.yaml` 更新後，既有 kind cluster 不會自動得到新的 `80/443` host port mapping。
+   - 只要本專案的 ingress 路徑有調整，就應優先使用 `make recreate-kind` 或 `make bootstrap-all`。
+
+2. **ingress controller 不能隨機排到 worker**：
+   - 這次實際踩到的症狀是：
+     - `kubectl get ingress` 顯示正常
+     - `actor-gateway` service 在 cluster 內可正常回應
+     - 但本機 `curl http://localhost/` 只得到 `Empty reply from server`
+   - 根因是 ingress controller 在 worker，而本機 port 80 mapping 只接到 control-plane。
+
+3. **Cassandra rollout 完成不等於 cqlsh 已可用**：
+   - `kubectl rollout status statefulset/cassandra` 成功後，native transport 仍可能需要額外數秒才會真正接受 `cqlsh` 連線。
 
 ## 5. 工程與效能 Trade-off 分析
 

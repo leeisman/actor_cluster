@@ -1,4 +1,4 @@
-.PHONY: kind-up deploy-infra init-db port-forward images verify-kind-images docker-build deploy-node redeploy-node refresh-nodes deploy-client load-test clean
+.PHONY: kind-up recreate-kind status-kind deploy-infra wait-infra init-db port-forward install-ingress images verify-kind-images docker-build deploy-node redeploy-node refresh-nodes deploy-gateway redeploy-gateway gateway-url gateway-logs bootstrap-gateway bootstrap-all load-test clean
 
 CLUSTER_NAME=actor-cluster
 IMAGE_NAME=actor:latest
@@ -15,6 +15,38 @@ kind-up:
 	kind create cluster --name $(CLUSTER_NAME) --config deploy/infra/kind-config.yaml
 	@echo "Cluster created."
 
+recreate-kind:
+	@echo "Recreating kind cluster so latest kind-config port mappings take effect..."
+	- kind delete cluster --name $(CLUSTER_NAME)
+	@$(MAKE) --no-print-directory kind-up
+
+status-kind:
+	@echo "=== kind clusters ==="
+	@kind get clusters || true
+	@echo ""
+	@echo "=== nodes ==="
+	@kubectl get nodes -o wide || true
+	@echo ""
+	@echo "=== pods ==="
+	@kubectl get pods -A -o wide || true
+	@echo ""
+	@echo "=== ingress ==="
+	@kubectl get ingress -A || true
+	@echo ""
+	@echo "=== gateway ==="
+	@kubectl get deploy/actor-gateway svc/actor-gateway -o wide || true
+
+install-ingress:
+	@echo "Installing ingress-nginx controller for kind..."
+	kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/kind/deploy.yaml
+	@echo "Pinning ingress controller to control-plane so hostPort 80/443 maps correctly..."
+	kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"actor-cluster-control-plane"}}}}}'
+	kubectl wait --namespace ingress-nginx \
+		--for=condition=ready pod \
+		--selector=app.kubernetes.io/component=controller \
+		--timeout=180s
+	@echo "ingress-nginx is ready."
+
 deploy-infra:
 	@echo "Deploying etcd and cassandra..."
 	kubectl apply -f deploy/infra/etcd.yaml
@@ -22,8 +54,18 @@ deploy-infra:
 	@echo "Wait for them to be ready: 'kubectl get pods -w'"
 	@echo "Once cassandra is running, execute 'make init-db' to create tables."
 
+wait-infra:
+	@echo "Waiting for etcd and cassandra to become ready..."
+	kubectl rollout status statefulset/etcd --timeout=180s
+	kubectl rollout status statefulset/cassandra --timeout=300s
+
 init-db:
 	@echo "Initializing Cassandra Schema..."
+	@echo "Waiting for Cassandra native transport..."
+	@until kubectl exec -i cassandra-0 -- cqlsh -e "DESCRIBE KEYSPACES" >/dev/null 2>&1; do \
+		echo "  Cassandra is not ready for cqlsh yet; retrying in 3s..."; \
+		sleep 3; \
+	done
 	kubectl exec -i cassandra-0 -- cqlsh -e "CREATE KEYSPACE IF NOT EXISTS wallet WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}; USE wallet; CREATE TABLE IF NOT EXISTS wallet_events (tenant_id int, uid bigint, version bigint, created_at timestamp, tx_id text, delta_amount bigint, payload blob, PRIMARY KEY ((tenant_id, uid), version)) WITH CLUSTERING ORDER BY (version ASC); CREATE TABLE IF NOT EXISTS wallet_snapshots (tenant_id int, uid bigint, balance bigint, last_version bigint, PRIMARY KEY ((tenant_id, uid)));"
 	@echo "Database Initialized."
 
@@ -90,6 +132,39 @@ redeploy-node:
 # 一條龍：建 image、kind load、重啟 node pods（日常改完 node 就這條）
 refresh-nodes: docker-build
 	@$(MAKE) --no-print-directory redeploy-node
+
+deploy-gateway:
+	@echo "Deploying test web gateway..."
+	kubectl apply -f deploy/gateway.yaml
+	kubectl rollout status deployment/actor-gateway --timeout=180s
+	@$(MAKE) --no-print-directory gateway-url
+
+redeploy-gateway:
+	@echo "Rolling restart deployment/actor-gateway to pick up re-loaded client image..."
+	kubectl rollout restart deployment/actor-gateway
+	kubectl rollout status deployment/actor-gateway --timeout=180s
+	@$(MAKE) --no-print-directory gateway-url
+
+gateway-url:
+	@echo "Gateway UI:"
+	@echo "  http://localhost/"
+
+gateway-logs:
+	kubectl logs -l app=actor-gateway -f
+
+bootstrap-gateway: install-ingress docker-build deploy-gateway
+
+bootstrap-all:
+	@echo "Bootstrapping full local cluster for gateway + nodes..."
+	@$(MAKE) --no-print-directory recreate-kind
+	@$(MAKE) --no-print-directory deploy-infra
+	@$(MAKE) --no-print-directory wait-infra
+	@$(MAKE) --no-print-directory init-db
+	@$(MAKE) --no-print-directory install-ingress
+	@$(MAKE) --no-print-directory docker-build
+	@$(MAKE) --no-print-directory deploy-node
+	@$(MAKE) --no-print-directory deploy-gateway
+	@$(MAKE) --no-print-directory status-kind
 
 # 使壓測支援開多個 Terminal 並行，預設 JOB_ID=1，第二個視窗可用 make load-test JOB_ID=2
 JOB_ID ?= 1

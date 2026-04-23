@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"log"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/frankieli/actor_cluster/pkg/remote"
@@ -28,6 +30,9 @@ type NodeStreamer struct {
 	cancel context.CancelFunc
 	stopCh chan struct{}
 	done   chan struct{}
+
+	failOnce sync.Once
+	dead     atomic.Bool
 }
 
 func NewNodeStreamer(
@@ -51,18 +56,18 @@ func NewNodeStreamer(
 	}
 
 	ns := &NodeStreamer{
-		TargetIP:       ip,
-		grpcConn:       conn,
-		stream:         stream,
-		envelopeCh:     make(chan *pb.RemoteEnvelope, targetSize*2),
-		targetSize:     targetSize,
-		flushDelay:     flushDelay,
-		callbackMap:    NewShardedCallbackMap(),
-		router:         router,
-		ctx:            ctx,
-		cancel:         cancel,
-		stopCh:         make(chan struct{}),
-		done:           make(chan struct{}),
+		TargetIP:    ip,
+		grpcConn:    conn,
+		stream:      stream,
+		envelopeCh:  make(chan *pb.RemoteEnvelope, targetSize*2),
+		targetSize:  targetSize,
+		flushDelay:  flushDelay,
+		callbackMap: NewShardedCallbackMap(),
+		router:      router,
+		ctx:         ctx,
+		cancel:      cancel,
+		stopCh:      make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 
 	go ns.flusherLoop()
@@ -80,12 +85,7 @@ func (ns *NodeStreamer) sendBatch(batch []*pb.RemoteEnvelope) {
 		if err != io.EOF {
 			log.Printf("[Streamer %s] Send error: %v", ns.TargetIP, err)
 		}
-		// 精準回收整批失敗的 Envelope，不讓記憶體洩漏
-		ns.router.errCount.Add(uint64(len(batch)))
-		for _, env := range batch {
-			ns.callbackMap.LoadAndDelete(env.RequestId)
-			ns.router.RecordError(remote.ErrTransportClosed)
-		}
+		ns.fail(remote.ErrTransportClosed)
 	} else {
 		ns.router.reqSent.Add(uint64(len(batch)))
 	}
@@ -100,6 +100,8 @@ func (ns *NodeStreamer) flusherLoop() {
 
 	for {
 		select {
+		case <-ns.ctx.Done():
+			return
 		case <-ns.stopCh:
 			ns.sendBatch(batch)
 			ns.stream.CloseSend() // 關閉送出流，通知 Server EOF
@@ -131,7 +133,7 @@ func (ns *NodeStreamer) receiverLoop() {
 				return
 			}
 			log.Printf("[Streamer %s] Recv error: %v", ns.TargetIP, err)
-			ns.callbackMap.FailAll(ns.router, remote.ErrStreamInterrupted)
+			ns.fail(remote.ErrStreamInterrupted)
 			return
 		}
 
@@ -148,15 +150,35 @@ func (ns *NodeStreamer) receiverLoop() {
 			}
 
 			// Demultiplexing & Latency Tracking: O(1) 內找到對應這筆 ReqID 的出發時間
-			if startedAt, ok := ns.callbackMap.LoadAndDelete(res.RequestId); ok {
-				ns.router.RecordLatency(time.Since(startedAt))
+			if entry, ok := ns.callbackMap.LoadAndDelete(res.RequestId); ok {
+				ns.router.RecordLatency(time.Since(entry.startedAt))
+				if entry.respCh != nil {
+					entry.respCh <- res
+				}
 			}
 		}
 	}
 }
 
 func (ns *NodeStreamer) StopAndWait() {
+	if ns.dead.Load() {
+		<-ns.done
+		return
+	}
 	close(ns.stopCh)
 	<-ns.done
 	ns.cancel()
+}
+
+func (ns *NodeStreamer) IsDead() bool {
+	return ns.dead.Load()
+}
+
+func (ns *NodeStreamer) fail(errCode string) {
+	ns.failOnce.Do(func() {
+		ns.dead.Store(true)
+		ns.router.evictStreamer(ns.TargetIP, ns)
+		ns.callbackMap.FailAll(ns.router, errCode)
+		ns.cancel()
+	})
 }

@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: actor-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: actor-gateway
+  template:
+    metadata:
+      labels:
+        app: actor-gateway
+    spec:
+      containers:
+      - name: gateway
+        image: actor-client:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "serve"
+        - "-http=:8080"
+        - "-etcd=etcd-client:2379"
+        - "-cassandra=cassandra-0.cassandra-headless.default.svc.cluster.local:9042"
+        - "-keyspace=wallet"
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: actor-gateway
+spec:
+  selector:
+    app: actor-gateway
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: actor-gateway
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: localhost
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: actor-gateway
+            port:
+              number: 80

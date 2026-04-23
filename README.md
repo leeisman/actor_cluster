@@ -108,8 +108,6 @@ Node
 
 ## Quick Start
 
-### Local development
-
 Requirements:
 
 - Go 1.25+（與 `go.mod` 一致）
@@ -117,51 +115,74 @@ Requirements:
 - Kind
 - kubectl
 
-Start infrastructure:
+### One-command local bootstrap
+
+If you want the full local stack, including:
+
+- kind cluster
+- etcd
+- Cassandra
+- ingress-nginx
+- actor node
+- web gateway
+
+run:
 
 ```bash
-make kind-up
-make deploy-infra
-make init-db
+make bootstrap-all
 ```
 
-Run a node locally against port-forwarded infra:
+Then open:
+
+- [http://localhost/](http://localhost/)
+
+Useful follow-up commands:
+
+```bash
+make status-kind
+make gateway-logs
+make load-test
+```
+
+### Incremental workflow
+
+If you are iterating on code and do not want to rebuild everything every time:
+
+```bash
+make docker-build
+make redeploy-node
+make redeploy-gateway
+```
+
+### Hybrid local Go development
+
+If you want to run binaries directly from your Mac while reusing infra inside kind:
 
 ```bash
 make port-forward
 go run ./cmd/node
+go run ./cmd/client serve
 ```
 
-### Build images
+### What `bootstrap-all` actually does
 
 ```bash
-make images
-```
-
-Load images into Kind and verify:
-
-```bash
+make recreate-kind
+make deploy-infra
+make wait-infra
+make init-db
+make install-ingress
 make docker-build
-```
-
-### Deploy nodes
-
-```bash
 make deploy-node
+make deploy-gateway
+make status-kind
 ```
 
-After code changes, force a fresh rollout:
+This ordering matters. In particular:
 
-```bash
-make refresh-nodes
-```
-
-### Run the load generator
-
-```bash
-make load-test
-kubectl logs -l app=load-generator -f
-```
+- the kind cluster must be recreated after ingress-related port mapping changes
+- Cassandra must be ready for `cqlsh`, not just scheduled
+- ingress-nginx must be pinned to the kind control-plane node so `localhost:80` really reaches it
 
 ## Specs and Design Docs
 

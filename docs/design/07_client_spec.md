@@ -1,107 +1,361 @@
-# Client (Load Generator) Specification
+# Client / Gateway Specification
 
-本文件定義 `cmd/client` (發射端與壓測負載產生器) 的高密度架構設計。嚴格遵守 `04_go_guidelines` 規範，拒絕無意義的 Goroutine 增生，並利用無鎖機制與批次 I/O 實現極限吞吐。
+本文件定義 `cmd/client` 的現行角色：它不是單純的 CLI 壓測器，而是**同一個 binary 下的雙模式入口**。
 
-**與 `pkg/discovery` 內之槽位/查表**（完整契約見 `01_discovery_spec.md` §5–§6、§14）：Client **不**直接實作 `SlotOf` 或預建表。取得目標 `host:port` 的**唯一**入口為 `TopologyResolver.GetNodeIP`（`EtcdResolver` 內 `atomic` 持表 + 拓樸刷新），與 `cmd/node` / `internal/node` 所有權檢查使用同一條查表語意。
+- `stress`：原本的高 TPS load generator
+- `serve`：玩家入口用的 test web gateway server
 
-### 與 `cmd/client` 原始碼對照
+`cmd/client` 仍然必須遵守 `pkg/discovery` 的單一真相邊界：**不可**在本模組內重寫 `SlotOf`、routing table 或 owner 演算法；所有目標節點解析一律透過 `TopologyResolver.GetNodeIP`。
 
-| 步驟 | 實作位置 |
-|------|----------|
-| etcd + `NewEtcdResolver` + `Watch` | `main.go` |
-| `TopologyResolver` 注入 `Router` | `NewRouter(resolver, …)` |
-| 每請求解析目標節點 | `router.go` → `EmulateGatewayFlow` → `resolver.GetNodeIP` |
-| **不**在 `main` 外額外 `import` 重複實作路由數學 | 僅用 `pkg/discovery`（`TopologyResolver`），與 `01_discovery_spec.md` §14 一致 |
+## 1. 模組定位
 
-## 1. 核心職責 (Core Responsibilities)
-1. **Topology Awareness (拓樸感知)**: 直連 etcd，利用 `pkg/discovery.EtcdResolver`（`TopologyResolver` 介面）Watch 拓樸並以 **`GetNodeIP(tenantID, uid)`** 解析目標 `POD_IP:port`；槽位雜湊與 1024 欄位預建表之數學**與** `EtcdResolver` **同套件**實作，避免本程式與叢集內各節點公式漂移。
-2. **Aggressive Batching (侵略性批次打包)**: 實體網路邊界必須打包。無法忍受 1 個 Request 浪費 1 次 TCP 系統呼叫，必須將大量單筆 `RemoteEnvelope` 根據目標 IP 進行聚合，打包為定時定量的 `BatchRequest`。
-3. **Stream Multiplexing (全雙工流傳輸)**: 維護對每一台 NodeIP 的單一長連線 (gRPC Bidi-Stream，對應 Node 端的 `StreamMessages` API)，大幅降低 TCP 握手與 HTTP/2 Header overhead。
-4. **Zero-Lock Metrics (無鎖數據採集)**: 壓測過程中的 TPS 與延遲統整，必須依賴 `sync/atomic` 或無鎖佇列，嚴禁使用 `sync.Mutex` 拖累吞吐。
+`cmd/client` 的職責：
 
-## 2. 結構與核心介面 (Core Structures & Interfaces)
+1. 透過 etcd watch 拿到當前叢集拓樸。
+2. 依 `(tenant_id, uid)` 把請求送到正確的 node `host:port`。
+3. 對每個目標 IP 維護單一 gRPC bidi stream，做批次聚合與結果回收。
+4. 在 `stress` 模式中做 fire-and-forget 高吞吐發射。
+5. 在 `serve` 模式中做同步 request/response bridge，作為真實玩家 HTTP 入口。
+6. 在 `serve` 模式中提供 Cassandra 直連餘額查詢，作為 debug / 對帳工具。
+
+不屬於 `cmd/client` 的事：
+
+- 不承擔 actor 業務狀態。
+- 不實作 node-to-node forwarding。
+- 不自己計算 slot / owner。
+- 不把 Cassandra 直連查詢當成正式 read model。
+
+## 2. 執行模式
+
+### 2.1 `stress`
+
+用途：保留原本的 CLI 壓測模式。
+
+啟動範例：
+
+```bash
+go run ./cmd/client stress -tps 50000 -concurrency 5000 -duration 30s
+```
+
+行為：
+
+- 啟動 etcd resolver。
+- 建立 `Router`。
+- 依 `tps / concurrency` 限速產生大量 `RemoteEnvelope`。
+- 每筆請求只記錄 latency 起點，不建立等待 channel。
+- 背景由 `ReceiverLoop` 收到 `BatchResponse` 後更新 success / error / latency metrics。
+
+### 2.2 `serve`
+
+用途：啟動 test web gateway server，作為玩家入口與 Ops console。
+
+啟動範例：
+
+```bash
+go run ./cmd/client serve \
+  -http :8080 \
+  -etcd 127.0.0.1:2379 \
+  -cassandra 127.0.0.1:9042 \
+  -keyspace wallet
+```
+
+行為：
+
+- 啟動 etcd resolver。
+- 建立與 `stress` 共用的 `Router` / `NodeStreamer` transport pipeline。
+- 建立 Cassandra session，供 debug balance query 使用。
+- 啟動內嵌 HTML dashboard 與 HTTP API。
+
+## 3. 核心結構
+
+### 3.1 Router
+
+`Router` 是 `cmd/client` 的核心 transport 調度器。
 
 ```go
-// NodeStreamer 負責對 單一目標伺服器 (POD_IP) 維護一條完整的發送/接收流與其專屬的 Aggregation Buffer
+type Router struct {
+    resolver   discovery.TopologyResolver
+    batchSize  int
+    flushDelay time.Duration
+
+    streamers sync.Map // map[string]*NodeStreamer
+
+    reqSent        atomic.Uint64
+    respRecv       atomic.Uint64
+    errCount       atomic.Uint64
+    latencyNanos   atomic.Uint64
+    latencySamples atomic.Uint64
+}
+```
+
+它提供兩種送法：
+
+- `EmulateGatewayFlow(...)`
+  用於 `stress` 模式，只做 fire-and-forget。
+- `ExecuteAndWait(env, timeout)`
+  用於 `serve` 模式，建立同步等待橋接。
+
+### 3.2 NodeStreamer
+
+對每個目標 IP 維護一條長壽命 gRPC stream。
+
+```go
 type NodeStreamer struct {
     TargetIP   string
     grpcConn   *grpc.ClientConn
     stream     pb.ActorService_StreamMessagesClient
-    
-    // Batch Aggregation
-    envelopeCh chan *pb.RemoteEnvelope // 有界 Channel，作為生產(發送器)與消費(Flusher)間的緩衝
-    batchSize  int                     // Batch 上限門檻 (例如：1000)
-    flushDelay time.Duration           // 最大 Flush 延遲 (例如：5ms)，時間到或塞滿即發送
+    envelopeCh chan *pb.RemoteEnvelope
+    targetSize int
+    flushDelay time.Duration
 
-    // Metrics
-    reqSent    atomic.Uint64
-    respRecv   atomic.Uint64
-}
-
-// ShardedCallbackMap：256 分片，每片一把 Mutex + map[reqID]chan（與實作一致）
-// type ShardedCallbackMap 見 cmd/client/router.go
-
-// Router 負責接管 TopologyResolver，進行全網觀測與派發
-type Router struct {
-    resolver    discovery.TopologyResolver
-    batchSize   int
-    flushDelay  time.Duration
     callbackMap *ShardedCallbackMap
-    streamers   sync.Map // map[IP]*NodeStreamer
+    router      *Router
+
+    ctx    context.Context
+    cancel context.CancelFunc
+    stopCh chan struct{}
+    done   chan struct{}
+
+    failOnce sync.Once
+    dead     atomic.Bool
 }
 ```
 
-## 3. 演算法與併發控制 (Concurrency Strategy)
+每個 `NodeStreamer` 固定只有兩條常駐 goroutine：
 
-### 3.1 拓樸觀測與單 IP 雙 Goroutine 模型
-為了避免 Gourtoutine 隨 Request 氾濫，Client 端實作 **1 個目標 IP Node 只需要長駐 2 個 Goroutine**：
-1. **Sender Loop (Flusher)**: 負責監聽 `envelopeCh` 與 `time.Ticker`。當陣列長度達到 `batchSize` 或是 Ticker 觸發，立刻將陣列建立為 `BatchRequest`，執行 `stream.Send()`。
-2. **Receiver Loop**: 背景阻擋在 `stream.Recv()`。一收到 `BatchResponse`（內含上千筆 `RemoteResult`），立刻迴圈並利用 `atomic.AddUint64` 增加成功數、解析 Histogram 取樣時間差。
+1. `flusherLoop`
+2. `receiverLoop`
 
-### 3.2 極端記憶體利用 (Memory Allocation Trade-off)
-- **避免動態分配 (Zero-Allocation)**: `BatchRequest` 內的 `Envelopes` slice 每次 flush 完畢後，不將其丟棄交給 GC。而是保留 Reference 替換或直接設定 `batch = batch[:0]` (但保留 Capacity)，確保底層陣列無限覆用。
-- **Pool 取用**: 高頻產生的 `*pb.RemoteEnvelope` 本體，由全域唯讀資料池 (Read-only Seed) 複製，或統一透過 `sync.Pool` 借用，避免逃逸至 Heap 產生碎片。
+這是 `cmd/client` 高併發下的重要設計原則：**goroutine 數量與目標 node 數量成正比，而不是與 request 數量成正比**。
 
-### 3.3 Gateway 請求關聯與 Demultiplexing (ReqID Correlation)
-如果 `cmd/client` 更貼近真實世界的「Gateway（長連線閘道器）」，它必須掛載數以萬計的真實客戶端 WebSocket 或 TCP Sockets，並將下游的 gRPC 回應精準對應回正確的 Socket 來源。為此，我們設計了針對高併發優化的非同步回調機制 (Correlation)：
+### 3.3 Sharded Callback Map
 
-1. **ReqID 配發**: 每個來自 Socket 的業務異動，都會被 Gateway 賦予一個全局唯一的 `ReqID`，寫入 `RemoteEnvelope`。
-2. **Sharded Callback Map**: 為了避免單一 map 的鎖競爭，實作 **256 分片**（`reqID % 256`），每片為 **`sync.Mutex` + `map[uint64]chan *pb.RemoteResult`**（`cmd/client` 內之 `ShardedCallbackMap`），與以 `[256]*sync.RWMutex` 綁一張大 map 的寫法不同，但分片意圖相同。
-3. **Dispatch & Callback**:
-   ```go
-   // 1. 產生 ReqID 與回調通道，並鎖入等待區
-   reqID := generateReqID()
-   respCh := make(chan *pb.RemoteResult, 1)
-   router.callbackMap.Store(reqID, respCh) 
-   
-   // 2. 利用 (TenantID, UID) 經 GetNodeIP 算出目標 host:port（底層與 `cmd/node` 同 discovery 實作），丟給該 IP 的 Flusher 佇列
-   targetIP, _ := router.resolver.GetNodeIP(tenantID, uid)
-   router.getStreamer(targetIP).envelopeCh <- envelope
-   
-   // 3. 處理該 Socket 的 Goroutine 阻塞等待，直到 K8s 下游處理完畢
-   result := <-respCh 
-   writeToClientSocket(socket, result)
-   ```
-4. **Receiver 喚醒反解**: 當 `NodeStreamer.ReceiverLoop` 從 gRPC 收到整包 `BatchResponse`，會高速迴圈解開上千筆 Result，並對每個 `result.ReqID` 從等待區中取出 `chan` 進行 `ch <- result`，從而喚醒特定的 Socket Goroutine。這個機制不僅能模擬壓力，也正是正式 Gateway 機制該有的設計。
+`ShardedCallbackMap` 採 256 shards，key 為全域唯一 `request_id`。
 
-## 4. 容錯與重分配 (Error Handling & Re-sharding)
+value 為：
 
-1. **`ERR_WRONG_NODE` 的捕捉**: 若 K8s Node Pod 掛掉、或新 Node 加入，etcd lease 失效期間 (5s 內) 會有不一致的空窗期。此段期間，Client 算出的 IP 可能錯誤，會收到 `RemoteResult.error_code == ERR_WRONG_NODE`（字串，見 `04_remote_spec.md` §7）。
-2. **Backoff & Retry 機制**（可選、尚未於 `cmd/client` 全面實作）: 針對 `ERR_WRONG_NODE`，應在拓樸收斂後**重新**呼叫 `GetNodeIP`（新表仍由同套件 resolver 內之 `BuildRoutingTable`+`Store` 定義）再送，而非在 Client 內自算 slot。
-3. **Graceful Shutdown**: Client 收到 SIGTERM 時，停止 Traffic Generator，`NodeStreamer.Sender` 執行強迫 flush，並呼叫 `stream.CloseSend()` 寫入 EOF。等待 `Receiver` 收到 K8s 遠端 Server 處裡完所有的 in-flight responses 送回後安全關閉，最後印出 Benchmark 報告。
+```go
+type callbackEntry struct {
+    startedAt time.Time
+    respCh    chan *pb.RemoteResult
+}
+```
 
-## 5. 工程與部署整合 (K8s Job Integration)
+兩種模式共用同一張表：
 
-作為本機或 K8s Job 啟動時，**以 `cmd/client` 的 command-line flag 為準**（`main.go` after `flag.Parse`），常見參數例如：
-- `-tps=50000`：目標整體 TPS
-- `-batch=1000`：每包上限
-- 另有 `-concurrency`、`-duration`、`-etcd` 等
+- `stress`：`respCh == nil`
+- `serve`：`respCh != nil`
 
-K8s Job 若要調參，通常寫在 **args** 或從 **env 注入腳本再拼成** 與上列等效之參數；以實際 `deploy` manifest 為準。
-- 壓測 Job 本身無須暴露 K8s Port。它會從 etcd (例如 `etcd-client:2379`) 拉取拓樸，然後宛如水砲一般，從 K8s `10.244.x.x` 發送大量 L4 封包直接橫穿 CNI 轟炸目標 Actor Node。
-- 結果僅輸出 Stdout，留由 EFK/Loki/CloudWatch 統整後續分析。
+這讓同一條 transport 同時支撐高吞吐壓測與同步 HTTP 玩家請求，而不需要分裂兩套 client stack。
 
-## 6. 避坑紀錄
+## 4. 併發與資料流
 
-1. **嚴禁在 `cmd/client` 內實作或複製 `SlotOf` / 建表**：歷史文檔曾誤寫 `resolver.SlotOf`；正確路徑僅有 **`GetNodeIP`**（**`pkg/discovery` 單一真相**，見 `01_discovery_spec.md` §14）。
-2. **`ERR_DISCOVERY` / `ERR_WRONG_NODE`**（見 `04_remote_spec.md` §7.3、§7.2）：前者為 `GetNodeIP` 失敗（resolver 尚未就緒或無 owner）；後者為已送達節點但所有權已變，需刷新拓樸後再 `GetNodeIP`，**不可**在 client 內以本地公式「修正」目標而繞開 **`pkg/discovery` 內**之槽位/表實作。串流中斷時未完成之回調可為 `ERR_STREAM_INTERRUPTED`。
+### 4.1 路由與送出
+
+所有請求路徑都必須：
+
+1. 產生全域唯一 `request_id`
+2. 呼叫 `resolver.GetNodeIP(tenantID, uid)`
+3. 取得對應 `NodeStreamer`
+4. 將 envelope 放入該 streamer 的 `envelopeCh`
+
+嚴禁：
+
+- 在 `cmd/client` 內自行計算 slot
+- 在 `cmd/client` 內建立第二份 routing table
+
+### 4.2 Fire-and-Forget Stress Path
+
+`stress` 模式下：
+
+1. 記錄 `startedAt`
+2. `respCh` 保持 `nil`
+3. `receiverLoop` 收到結果後只更新 metrics
+
+這樣可避免每秒數萬筆 request 產生大量 channel allocation。
+
+### 4.3 Sync HTTP Bridge Path
+
+`serve` 模式下：
+
+1. HTTP handler 建立 `respCh := make(chan *pb.RemoteResult, 1)`
+2. 呼叫 `ExecuteAndWait`
+3. `ReceiverLoop` 依 `request_id` 找回 `respCh`
+4. 將對應 `RemoteResult` 回送給 handler
+5. handler 再轉成 HTTP JSON response
+
+這讓 transport 維持 async/batched，而對玩家呈現同步 request/response。
+
+## 5. HTTP API
+
+### 5.1 `POST /api/wallet/execute`
+
+玩家真實請求入口。
+
+Request:
+
+```json
+{
+  "uid": 1,
+  "amount": 100
+}
+```
+
+流程：
+
+1. 驗證 `uid > 0`
+2. 產生全域唯一 `request_id`
+3. 將 `amount` 轉為 Big-Endian `int64` payload
+4. 建立 `RemoteEnvelope{OpCode=1}`
+5. 呼叫 `ExecuteAndWait(..., 5s)`
+6. 把 `RemoteResult` 映射成 HTTP response
+
+Response 範例：
+
+```json
+{
+  "success": true,
+  "request_id": 281474976710657,
+  "uid": 1,
+  "amount": 100,
+  "error_code": "",
+  "error_msg": "",
+  "balance": 1500
+}
+```
+
+狀態碼：
+
+- `200`：成功
+- `400`：`ERR_INVALID_PAYLOAD` / `ERR_INSUFFICIENT_FUNDS`
+- `503`：`ERR_DISCOVERY` / `ERR_CONNECTION` / `ERR_TRANSPORT_CLOSED` / `ERR_STREAM_INTERRUPTED` / `ERR_WRONG_NODE`
+- `504`：`ERR_DEADLINE_EXCEEDED`
+
+注意：
+
+- 這一層既然是玩家入口，就必須是同步等待結果的模式。
+- timeout 只代表 gateway 等待逾時，不代表後端一定沒處理成功。
+
+### 5.2 `GET /api/wallet/balance/:uid`
+
+debug / 對帳用途，不走 actor write path。
+
+流程：
+
+1. `SELECT balance, last_version FROM wallet_snapshots WHERE tenant_id = ? AND uid = ?`
+2. `SELECT delta_amount FROM wallet_events WHERE tenant_id = ? AND uid = ? AND version > ? ORDER BY version ASC`
+3. 在 gateway 記憶體中累加 delta
+
+Response 範例：
+
+```json
+{
+  "uid": 1,
+  "exact_balance": 1500,
+  "last_version": 17
+}
+```
+
+這條 API 是 Cassandra 單 partition query，不是全表掃描；但它仍然只是 debug 工具，不是正式 CQRS read model。
+
+### 5.3 `POST /api/stress/start`
+
+啟動背景壓測。
+
+Request:
+
+```json
+{
+  "tps_target": 50000,
+  "concurrency": 5000,
+  "duration_sec": 30
+}
+```
+
+流程：
+
+1. 檢查目前是否已有壓測在跑
+2. 若無，建立背景 `StressEngine`
+3. 立即回 `200`
+
+### 5.4 `POST /api/stress/stop`
+
+停止背景壓測。若沒有正在執行的壓測，回傳 idempotent 成功即可。
+
+### 5.5 `GET /api/stress/status`
+
+回傳目前壓測狀態與 metrics：
+
+```json
+{
+  "is_running": true,
+  "total_sent": 150000,
+  "total_success": 149990,
+  "total_errors": 10,
+  "current_tps": 49950,
+  "avg_latency_ms": 2.4,
+  "error_breakdown": {
+    "ERR_WRONG_NODE": 10
+  }
+}
+```
+
+## 6. Web UI
+
+`serve` 模式在 `/` 提供內嵌單檔 dashboard。
+
+目前包含：
+
+- Manual execute 表單
+- Balance query 表單
+- Stress start / stop 控制
+- Live metrics
+- Event log
+
+設計原則：
+
+- 不引入前端 build pipeline
+- 以單檔 HTML / CSS / JS 內嵌在 Go 內
+- 偏 Ops console / debug dashboard 取向，而不是正式產品前台
+
+## 7. 容錯與生命週期
+
+### 7.1 Dead Streamer Eviction
+
+若 `NodeStreamer` 發生 send / recv transport failure：
+
+1. 標記 `dead = true`
+2. 從 `Router.streamers` 中 evict
+3. fail 掉該 streamer 的所有 pending callbacks
+4. cancel 自己的 context
+
+之後 `Router.getStreamer(ip)` 不得重用這個 dead streamer，而必須重建新連線。
+
+這是為了避免某個 target IP 因一個暫時性 gRPC 異常，整場測試都黑洞化。
+
+### 7.2 Graceful Shutdown
+
+`stress` / `serve` 關閉時：
+
+1. 停止新流量進入
+2. `flusherLoop` 先 flush buffer
+3. `stream.CloseSend()`
+4. 等 `receiverLoop` 把剩餘回應收完
+5. 關閉 gRPC connection
+
+### 7.3 Timeout Cleanup
+
+同步 `ExecuteAndWait` 若 timeout：
+
+- 必須移除該 `request_id` 對應的 pending callback
+- 不可留下 memory leak
+
+## 8. 工程規則與避坑
+
+1. `request_id` 必須維持叢集全域唯一。
+2. 不可在 `cmd/client` 內複製 discovery 數學。
+3. `stress` 模式禁止每筆建立 response channel。
+4. `serve` 的 execute 必須同步等待結果，因為這一層是玩家真實入口。
+5. `GET /api/wallet/balance/:uid` 是 debug 工具，不代表正式 read side。
+6. dead streamer 一定要能 evict 並重建，不可永久 cache 壞連線。
+7. 所有 transport 錯誤字串應與 `pkg/remote/errors.go` 對齊。

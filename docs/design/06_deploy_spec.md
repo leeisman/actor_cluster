@@ -76,12 +76,12 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 
 4. **`make install-ingress`**：
    - **用途**：安裝 `ingress-nginx` controller（kind provider manifest）。
-   - **結果**：叢集可接收 `Ingress` 資源，將 `http://localhost/` 路由到 cluster 內的 web gateway service。
+   - **結果**：叢集可接收 `Ingress` 資源，將 `http://actor-cluster.localhost/` 路由到 cluster 內的 web gateway service。
    - **固定規則**：安裝後 Makefile 會立即把 `ingress-nginx-controller` 固定到 `actor-cluster-control-plane`。原因是本專案的 `80/443` host port mapping 只綁在 kind control-plane container；若 controller 被 scheduler 放到 worker，瀏覽器雖然可以連到本機 port 80，但實際上不會命中 ingress controller。
 
 5. **`make deploy-gateway`**：
    - **用途**：部署 `actor-gateway` 的 `Deployment + Service + Ingress`。
-   - **對外入口**：`http://localhost/`
+   - **對外入口**：`http://actor-cluster.localhost/`
 
 6. **`make redeploy-gateway`**：
    - **用途**：在已經 `kind load` 新 `actor-client:latest` 之後，滾動重啟 gateway deployment 讓新 binary 生效。
@@ -134,7 +134,7 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
    - 這次實際踩到的症狀是：
      - `kubectl get ingress` 顯示正常
      - `actor-gateway` service 在 cluster 內可正常回應
-     - 但本機 `curl http://localhost/` 只得到 `Empty reply from server`
+     - 但本機 `curl http://actor-cluster.localhost/` 只得到 `Empty reply from server`
    - 根因是 ingress controller 在 worker，而本機 port 80 mapping 只接到 control-plane。
 
 3. **Cassandra rollout 完成不等於 cqlsh 已可用**：

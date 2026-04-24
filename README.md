@@ -134,7 +134,7 @@ make bootstrap-all
 
 Then open:
 
-- [http://localhost/](http://localhost/)
+- [http://actor-cluster.localhost/](http://actor-cluster.localhost/)
 
 Useful follow-up commands:
 

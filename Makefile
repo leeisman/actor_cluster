@@ -147,7 +147,7 @@ redeploy-gateway:
 
 gateway-url:
 	@echo "Gateway UI:"
-	@echo "  http://localhost/"
+	@echo "  http://actor-cluster.localhost/"
 
 gateway-logs:
 	kubectl logs -l app=actor-gateway -f

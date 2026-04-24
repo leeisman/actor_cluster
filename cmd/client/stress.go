@@ -75,12 +75,15 @@ func runStressCommand(args []string) error {
 	defer cleanup()
 
 	log.Printf("Starting Load Generator: target %d TPS, concurrency %d", cfg.tpsTarget, cfg.concurrency)
-	stopMetrics := startMetricsReporter(ctx, router, func(tps uint64) {
-		log.Printf("Live: Sent(TPS): %d | Success(TPS): %d | Error(TPS): %d | Total Sent: %d",
-			tps,
+	stopMetrics := startMetricsReporter(ctx, router, func(sentTPS, successTPS, errorTPS, inFlight uint64) {
+		log.Printf("Live: Sent(TPS): %d | Success(TPS): %d | Error(TPS): %d | InFlight: %d | Totals sent=%d success=%d error=%d",
+			sentTPS,
+			successTPS,
+			errorTPS,
+			inFlight,
+			router.reqSent.Load(),
 			router.respRecv.Load(),
 			router.errCount.Load(),
-			router.reqSent.Load(),
 		)
 	})
 	defer stopMetrics()
@@ -90,12 +93,14 @@ func runStressCommand(args []string) error {
 
 	runStressGenerators(runCtx, router, cfg)
 	log.Println("Traffic generation duration completed. Waiting for in-flight responses to drain...")
-	drainInFlight(router, 15*time.Second)
+	drained, abandoned := drainInFlight(router, 15*time.Second)
 
 	log.Printf("===== Load Test Finished =====")
 	log.Printf("Total Sent Envelopes: %d", router.reqSent.Load())
 	log.Printf("Total Success Responses: %d", router.respRecv.Load())
 	log.Printf("Total Errors: %d", router.errCount.Load())
+	log.Printf("Drain Complete: %t", drained)
+	log.Printf("InFlight Unfinished: %d", abandoned)
 	log.Printf("Error Breakdown: %v", router.ErrorBreakdownMap())
 
 	return nil
@@ -125,8 +130,8 @@ func (e *StressEngine) Start(cfg stressConfig) error {
 		defer close(done)
 		defer e.running.Store(false)
 
-		stopMetrics := startMetricsReporter(ctx, e.router, func(tps uint64) {
-			e.currentTPS.Store(tps)
+		stopMetrics := startMetricsReporter(ctx, e.router, func(sentTPS, _, _, _ uint64) {
+			e.currentTPS.Store(sentTPS)
 		})
 		defer stopMetrics()
 
@@ -240,29 +245,32 @@ func runStressGenerators(ctx context.Context, router *Router, cfg stressConfig) 
 	wg.Wait()
 }
 
-func drainInFlight(router *Router, timeout time.Duration) {
+func drainInFlight(router *Router, timeout time.Duration) (drained bool, unfinished uint64) {
 	deadline := time.Now().Add(timeout)
 	for {
 		sent := router.reqSent.Load()
 		handled := router.respRecv.Load() + router.errCount.Load()
 		if handled >= sent {
-			return
+			return true, 0
 		}
 		if time.Now().After(deadline) {
-			log.Printf("Drain timeout! Abandoning %d in-flight requests...", sent-handled)
-			return
+			unfinished = sent - handled
+			log.Printf("Drain timeout! %d requests are still in-flight after %s.", unfinished, timeout)
+			return false, unfinished
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 }
 
-func startMetricsReporter(ctx context.Context, router *Router, onTPS func(uint64)) func() {
+func startMetricsReporter(ctx context.Context, router *Router, onTick func(sentTPS, successTPS, errorTPS, inFlight uint64)) func() {
 	stop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 
 		var lastSent uint64
+		var lastSuccess uint64
+		var lastErrors uint64
 		for {
 			select {
 			case <-ctx.Done():
@@ -271,9 +279,20 @@ func startMetricsReporter(ctx context.Context, router *Router, onTPS func(uint64
 				return
 			case <-ticker.C:
 				currSent := router.reqSent.Load()
-				tps := currSent - lastSent
+				currSuccess := router.respRecv.Load()
+				currErrors := router.errCount.Load()
+				sentTPS := currSent - lastSent
+				successTPS := currSuccess - lastSuccess
+				errorTPS := currErrors - lastErrors
+				handled := currSuccess + currErrors
+				var inFlight uint64
+				if currSent > handled {
+					inFlight = currSent - handled
+				}
 				lastSent = currSent
-				onTPS(tps)
+				lastSuccess = currSuccess
+				lastErrors = currErrors
+				onTick(sentTPS, successTPS, errorTPS, inFlight)
 			}
 		}
 	}()

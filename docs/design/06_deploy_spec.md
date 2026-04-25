@@ -124,7 +124,72 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 14. **`make clean`**：
    - **用途**：刪除整個 kind cluster。
 
-### 4.8 避坑紀錄
+### 4.8 Monitoring Baseline（Prometheus / Grafana）
+
+15. **目標**：
+   - 在本地 `kind` 環境先建立一套最小可用的觀測平台，讓開發者能看到：
+     - K8s 物件狀態（Pod Ready / Restart）
+     - Node CPU / Memory
+     - Prometheus 原始查詢
+     - Grafana 基礎圖表
+   - **本階段只負責部署觀測平台，不預設承諾大量 application-level metrics。**
+
+16. **部署元件（第一版）**：
+   - `Prometheus`
+   - `Grafana`
+   - `kube-state-metrics`
+   - `node-exporter`
+
+17. **部署位置**：
+   - 建議獨立使用 `monitoring` namespace，避免與 `default` 業務元件混在一起。
+   - Prometheus 與 Grafana 均透過 `deploy/monitoring/` 下的 manifest 維護。
+   - **Manifest 檔案（第一版）**：
+     - `namespace.yaml`
+     - `prometheus-rbac.yaml`（Prometheus `ServiceAccount` + `ClusterRole` + `ClusterRoleBinding`）
+     - `prometheus-config.yaml`（Prometheus `ConfigMap`：`prometheus.yml`）
+     - `prometheus.yaml`（Prometheus `Deployment` + `Service`）
+     - `kube-state-metrics.yaml`（`ServiceAccount`、`ClusterRole`、`ClusterRoleBinding`、`Deployment`、`Service`）
+     - `node-exporter.yaml`（`DaemonSet` + `Service`）
+     - `grafana.yaml`（Grafana datasource provisioning `ConfigMap`、`Deployment`、`Service`）
+     - `ingress.yaml`（**`Ingress` 名稱：`monitoring-ui`**；`grafana.localhost` / `prometheus.localhost`，**需已執行** `make install-ingress`；與舊版 `Ingress/monitoring` 二選一，`deploy-monitoring` 會刪除後者以免 nginx admission 重複 host）
+
+18. **入口設計**：
+   - **Grafana / Prometheus 對外訪問**可採兩種模式：
+     - **Ingress 模式**：以 host-based routing 綁定本機 `80`，例如：
+       - `http://grafana.localhost/`
+       - `http://prometheus.localhost/`
+     - **Port-forward 模式**：作為 ingress 以外的 debug 後門，例如：
+       - `127.0.0.1:3000` -> Grafana
+       - `127.0.0.1:9090` -> Prometheus
+
+19. **Makefile 建議入口**（已實作於專案根目錄 `Makefile`）：
+   - `make deploy-monitoring`
+     - 依序 `kubectl apply` 上述 manifest（`kube-state-metrics` 前有 **selector 遷移**：若現有 `Deployment/kube-state-metrics` 的 `spec.selector` 不是 `app=kube-state-metrics`，則**只刪除該 Deployment** 再 apply，避免 immutable selector 造成 apply 失敗；`ingress.yaml` 前會 **`kubectl delete ingress/monitoring`**（`--ignore-not-found`）以免與 `monitoring-ui` 重複綁定相同 host）。
+     - 最後等待 `prometheus`、`kube-state-metrics`、`grafana` rollout 與 `node-exporter` DaemonSet 就緒，並列印 `make monitoring-urls` 的提示。
+   - `make redeploy-monitoring`
+     - 與 `deploy-monitoring` 相同（idempotent 重套 manifest）。
+   - `make monitoring-port-forward`
+     - 背景啟動 `grafana:3000`、`prometheus:9090` 的 port-forward（適合未走 Ingress 時）。
+   - `make monitoring-urls`
+     - 列出 Ingress 與 port-forward 兩種訪問方式。
+
+20. **與 `bootstrap-all` 的關係**：
+   - `make bootstrap-all` **不包含** monitoring；叢集起來後若要觀測底座，請另執行 `make install-ingress`（若要走 Ingress）與 `make deploy-monitoring`。
+
+21. **這一版刻意不做的事情**：
+   - 不先引入大量 `cmd/client` / `internal/node` / `pkg/actor` 的 Prometheus 埋點
+   - 不先定義 AI bottleneck analysis
+   - 不先要求 Grafana dashboard 一定完整自動 provisioning
+   - 不先做 eBPF / deep tracing
+
+22. **工程取捨**：
+   - 先把 Prometheus / Grafana 部署進來，目的是建立觀測底座。
+   - 真正的 application metrics 必須等我們先釐清：
+     - 要回答什麼問題
+     - 哪些指標值得長期維護
+   - 否則容易在代碼內埋入過量、低價值且高維護成本的 metrics。
+
+### 4.9 避坑紀錄
 
 1. **舊 cluster 必須重建**：
    - `deploy/infra/kind-config.yaml` 更新後，既有 kind cluster 不會自動得到新的 `80/443` host port mapping。

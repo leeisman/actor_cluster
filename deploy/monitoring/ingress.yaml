@@ -1,0 +1,30 @@
+# Canonical monitoring ingress name: monitoring-ui (avoids a second Ingress duplicating grafana.localhost / prometheus.localhost).
+# Requires ingress-nginx (make install-ingress). Hosts resolve to 127.0.0.1 on most desktops (*.localhost).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: monitoring-ui
+  namespace: monitoring
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: grafana.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
+    - host: prometheus.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus
+                port:
+                  number: 9090

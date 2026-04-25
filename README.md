@@ -76,6 +76,7 @@ pkg/
 
 deploy/
   infra/         etcd, Cassandra, Kind manifests
+  monitoring/    Prometheus, Grafana, kube-state-metrics, node-exporter (observability baseline)
   build/         Dockerfile
   *.yaml         Node and client deployment manifests
 
@@ -142,6 +143,28 @@ Useful follow-up commands:
 make status-kind
 make gateway-logs
 make load-test
+```
+
+### Monitoring baseline (Prometheus / Grafana)
+
+This stack is **platform-only**: it deploys Prometheus, Grafana, kube-state-metrics, and node-exporter into the `monitoring` namespace. It does **not** add application metrics to `cmd/client`, `cmd/node`, or `pkg/actor`.
+
+Prerequisite: a running kind cluster. For HTTP hosts on port 80, install ingress first (same as the actor gateway):
+
+```bash
+make install-ingress   # if you have not already
+make deploy-monitoring
+kubectl get pods -n monitoring
+```
+
+- **Ingress** (`Ingress/monitoring-ui` in namespace `monitoring`): [http://grafana.localhost/](http://grafana.localhost/) and [http://prometheus.localhost/](http://prometheus.localhost/) (Grafana login defaults: `admin` / `admin`). `make deploy-monitoring` removes a legacy `Ingress/monitoring` in that namespace if present so host rules are not duplicated.
+- **Port-forward** (no ingress): `make monitoring-port-forward` then open [http://127.0.0.1:3000](http://127.0.0.1:3000) and [http://127.0.0.1:9090](http://127.0.0.1:9090).
+
+Sanity checks in the Prometheus UI: queries such as `kube_pod_status_phase` (kube-state-metrics) and `node_cpu_seconds_total` (node-exporter).
+
+```bash
+make monitoring-urls
+make redeploy-monitoring   # re-apply manifests; same recipe as deploy-monitoring
 ```
 
 ### Incremental workflow

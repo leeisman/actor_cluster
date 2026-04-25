@@ -1,6 +1,10 @@
-.PHONY: kind-up recreate-kind status-kind deploy-infra wait-infra init-db port-forward install-ingress images verify-kind-images docker-build deploy-node redeploy-node refresh-nodes deploy-gateway redeploy-gateway gateway-url gateway-logs bootstrap-gateway bootstrap-all load-test clean
+.PHONY: kind-up recreate-kind status-kind deploy-infra wait-infra init-db port-forward install-ingress images verify-kind-images docker-build deploy-node redeploy-node refresh-nodes deploy-gateway redeploy-gateway gateway-url gateway-logs bootstrap-gateway bootstrap-all load-test deploy-monitoring redeploy-monitoring migrate-kube-state-metrics-if-needed migrate-legacy-monitoring-ingress monitoring-port-forward monitoring-urls clean
 
 CLUSTER_NAME=actor-cluster
+MONITORING_DIR := deploy/monitoring
+# kube-state-metrics apply runs after migrate-kube-state-metrics-if-needed; ingress last after dropping stale ingress/monitoring.
+MONITORING_BEFORE_KSM := namespace.yaml prometheus-rbac.yaml prometheus-config.yaml prometheus.yaml
+MONITORING_AFTER_KSM := node-exporter.yaml grafana.yaml
 IMAGE_NAME=actor:latest
 CLIENT_IMAGE=actor-client:latest
 
@@ -177,6 +181,50 @@ load-test:
 	@sleep 2
 	kubectl logs -l app=load-generator-$(JOB_ID) -f
 	@echo "Check real-time TPS with: kubectl logs -l app=load-generator -f"
+
+# Monitoring baseline (Prometheus / Grafana / kube-state-metrics / node-exporter). Does not deploy app metrics.
+# Ingress hosts require a prior `make install-ingress` (same as actor gateway).
+migrate-kube-state-metrics-if-needed:
+	@if kubectl get deploy kube-state-metrics -n monitoring >/dev/null 2>&1; then \
+		APPSEL=$$(kubectl get deploy kube-state-metrics -n monitoring -o jsonpath='{.spec.selector.matchLabels.app}' 2>/dev/null || true); \
+		if [ "$$APPSEL" != "kube-state-metrics" ]; then \
+			echo "$(MONITORING_DIR): deleting kube-state-metrics Deployment (selector is immutable; was $$APPSEL, need app=kube-state-metrics)..."; \
+			kubectl delete deployment kube-state-metrics -n monitoring --wait=true; \
+		fi; \
+	fi
+
+# Removes repo-legacy Ingress monitoring if present so only ingress/monitoring-ui owns grafana.localhost / prometheus.localhost.
+migrate-legacy-monitoring-ingress:
+	@kubectl delete ingress monitoring -n monitoring --ignore-not-found
+
+deploy-monitoring redeploy-monitoring:
+	@echo "Applying monitoring manifests ($(MONITORING_DIR))..."
+	@for f in $(MONITORING_BEFORE_KSM); do kubectl apply -f $(MONITORING_DIR)/$$f; done
+	@$(MAKE) --no-print-directory migrate-kube-state-metrics-if-needed
+	@kubectl apply -f $(MONITORING_DIR)/kube-state-metrics.yaml
+	@for f in $(MONITORING_AFTER_KSM); do kubectl apply -f $(MONITORING_DIR)/$$f; done
+	@$(MAKE) --no-print-directory migrate-legacy-monitoring-ingress
+	@kubectl apply -f $(MONITORING_DIR)/ingress.yaml
+	kubectl rollout status deployment/prometheus -n monitoring --timeout=180s
+	kubectl rollout status deployment/kube-state-metrics -n monitoring --timeout=180s
+	kubectl rollout status deployment/grafana -n monitoring --timeout=180s
+	kubectl rollout status daemonset/node-exporter -n monitoring --timeout=180s
+	@$(MAKE) --no-print-directory monitoring-urls
+
+monitoring-port-forward:
+	@echo "Grafana:    http://127.0.0.1:3000  (login admin / admin)"
+	@echo "Prometheus: http://127.0.0.1:9090"
+	@echo "Press Ctrl+C to stop both forwards."
+	@sh -c 'kubectl port-forward -n monitoring svc/grafana 3000:3000 & kubectl port-forward -n monitoring svc/prometheus 9090:9090 & wait'
+
+monitoring-urls:
+	@echo "=== Monitoring URLs ==="
+	@echo "Ingress monitoring-ui (needs: make install-ingress; hosts grafana.localhost / prometheus.localhost resolve to 127.0.0.1 on many systems):"
+	@echo "  Grafana:    http://grafana.localhost/"
+	@echo "  Prometheus: http://prometheus.localhost/"
+	@echo "Port-forward (works without Ingress):"
+	@echo "  make monitoring-port-forward"
+	@echo "Verify: kubectl get pods -n monitoring"
 
 clean:
 	@echo "Destroying Kind cluster..."

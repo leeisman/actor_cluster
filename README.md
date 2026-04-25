@@ -145,6 +145,47 @@ make gateway-logs
 make load-test
 ```
 
+### Local load-test TPS reading
+
+For local throughput validation, the recommended path is the in-cluster load generator:
+
+```bash
+make load-test TPS=100000 CONCURRENCY=5000 DURATION=30s DRAIN_WINDOW=60s UID_MIN=1 UID_MAX=256
+```
+
+This measures the **cluster-internal** path:
+
+```text
+load-generator job
+  -> discovery
+  -> gRPC stream + batching
+  -> actor-node
+  -> actor mailbox / persistence
+  -> response stream
+```
+
+Key fields in the final summary:
+
+- `Offered TPS`
+  - `total_sent / generation_duration`
+  - How fast the load generator pushed work into the system.
+- `Completed TPS`
+  - `total_success / total_completion_duration`
+  - How fast the system fully consumed the workload, including drain time.
+- `Drain Complete`
+  - `true` means all in-flight requests finished within the configured drain window.
+- `InFlight Unfinished`
+  - Remaining requests not completed before the drain window expired.
+- `Callback Map Pending`
+  - Client-side pending callbacks still waiting for completion.
+
+Interpretation notes:
+
+- If `Drain Complete=true`, `Completed TPS` is the most honest “fully consumed throughput” number for that run.
+- If `Drain Complete=false`, `Completed TPS` is only the throughput of the portion that completed within the drain window; it is **not** the final full-consumption throughput.
+- `UID_MIN` / `UID_MAX` matter: a small UID range creates a hot-spot workload, while a larger range spreads pressure across more actors.
+- Local results will vary with kind / Docker Desktop resources and Cassandra health, so the README intentionally documents **how to measure** rather than promising one fixed TPS number.
+
 ### Monitoring baseline (Prometheus / Grafana)
 
 This stack is **platform-only**: it deploys Prometheus, Grafana, kube-state-metrics, and node-exporter into the `monitoring` namespace. It does **not** add application metrics to `cmd/client`, `cmd/node`, or `pkg/actor`.

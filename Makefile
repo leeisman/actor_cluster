@@ -172,11 +172,18 @@ bootstrap-all:
 
 # 使壓測支援開多個 Terminal 並行，預設 JOB_ID=1，第二個視窗可用 make load-test JOB_ID=2
 JOB_ID ?= 1
+TPS ?= 100000
+CONCURRENCY ?= 5000
+BATCH ?= 2000
+DURATION ?= 30s
+DRAIN_WINDOW ?= 60s
+UID_MIN ?= 1
+UID_MAX ?= 100
 
 load-test:
 	@echo "Spawning Client Load Generator Job-$(JOB_ID) inside K8s..."
 	@kubectl delete job actor-load-generator-$(JOB_ID) --ignore-not-found
-	@sed 's/name: actor-load-generator/name: actor-load-generator-$(JOB_ID)/; s/app: load-generator/app: load-generator-$(JOB_ID)/' deploy/client-job.yaml | kubectl apply -f -
+	@sed 's/name: actor-load-generator/name: actor-load-generator-$(JOB_ID)/; s/app: load-generator/app: load-generator-$(JOB_ID)/; s/-tps=100000/-tps=$(TPS)/; s/-concurrency=5000/-concurrency=$(CONCURRENCY)/; s/-batch=2000/-batch=$(BATCH)/; s/-duration=30s/-duration=$(DURATION)/; s/-drain-window=60s/-drain-window=$(DRAIN_WINDOW)/; s/-uid-min=1/-uid-min=$(UID_MIN)/; s/-uid-max=100/-uid-max=$(UID_MAX)/' deploy/client-job.yaml | kubectl apply -f -
 	@echo "Waiting for Pod to spin up..."
 	@sleep 2
 	kubectl logs -l app=load-generator-$(JOB_ID) -f

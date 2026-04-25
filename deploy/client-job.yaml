@@ -18,4 +18,6 @@ spec:
         # -tps=100000      : 期望把 2 檯 Node 打到 10 萬 TPS。
         # -concurrency=5000: 模擬 Gateway 挾帶 5 千長連線。
         # -batch=2000      : 將 Envelope 高度壓實，降低網路 I/O Syscall。
-        args: ["stress", "-etcd=etcd-client:2379", "-tps=100000", "-concurrency=5000", "-batch=2000", "-duration=30s"]
+        # -drain-window=60s: 停止送流量後，最多再等 60 秒排空 in-flight。
+        # -uid-min/-uid-max: 控制亂數 UID 範圍，用來測熱點 actor 或大範圍分散壓測。
+        args: ["stress", "-etcd=etcd-client:2379", "-tps=100000", "-concurrency=5000", "-batch=2000", "-duration=30s", "-drain-window=60s", "-uid-min=1", "-uid-max=100"]

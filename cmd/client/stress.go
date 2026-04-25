@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"log"
 	"math/rand"
 	"os"
@@ -22,6 +23,9 @@ type stressConfig struct {
 	tpsTarget   int
 	concurrency int
 	duration    time.Duration
+	drainWindow time.Duration
+	uidMin      int64
+	uidMax      int64
 }
 
 type stressStatus struct {
@@ -61,7 +65,13 @@ func runStressCommand(args []string) error {
 	fs.IntVar(&cfg.tpsTarget, "tps", 50000, "target overall TPS across all clients")
 	fs.IntVar(&cfg.concurrency, "concurrency", 5000, "virtual client sockets concurrency")
 	fs.DurationVar(&cfg.duration, "duration", 30*time.Second, "test duration")
+	fs.DurationVar(&cfg.drainWindow, "drain-window", 60*time.Second, "how long to wait for in-flight requests to drain after traffic stops")
+	fs.Int64Var(&cfg.uidMin, "uid-min", 1, "minimum uid (inclusive) used by the random load generator")
+	fs.Int64Var(&cfg.uidMax, "uid-max", 100, "maximum uid (inclusive) used by the random load generator")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := cfg.normalize(); err != nil {
 		return err
 	}
 
@@ -74,7 +84,14 @@ func runStressCommand(args []string) error {
 	}
 	defer cleanup()
 
-	log.Printf("Starting Load Generator: target %d TPS, concurrency %d", cfg.tpsTarget, cfg.concurrency)
+	log.Printf(
+		"Starting Load Generator: target %d TPS, concurrency %d, uid range [%d,%d], drain window %s",
+		cfg.tpsTarget,
+		cfg.concurrency,
+		cfg.uidMin,
+		cfg.uidMax,
+		cfg.drainWindow,
+	)
 	stopMetrics := startMetricsReporter(ctx, router, func(sentTPS, successTPS, errorTPS, inFlight uint64) {
 		log.Printf("Live: Sent(TPS): %d | Success(TPS): %d | Error(TPS): %d | InFlight: %d | Totals sent=%d success=%d error=%d",
 			sentTPS,
@@ -91,13 +108,27 @@ func runStressCommand(args []string) error {
 	runCtx, cancel := context.WithTimeout(ctx, cfg.duration)
 	defer cancel()
 
+	generationStartedAt := time.Now()
 	runStressGenerators(runCtx, router, cfg)
+	generationDuration := time.Since(generationStartedAt)
 	log.Println("Traffic generation duration completed. Waiting for in-flight responses to drain...")
-	drained, abandoned := drainInFlight(router, 15*time.Second)
+	drainStartedAt := time.Now()
+	drained, abandoned := drainInFlight(router, cfg.drainWindow)
+	drainDuration := time.Since(drainStartedAt)
+	totalCompletionDuration := generationDuration + drainDuration
+	totalSent := router.reqSent.Load()
+	totalSuccess := router.respRecv.Load()
+	offeredTPS := throughputPerSecond(totalSent, generationDuration)
+	completedTPS := throughputPerSecond(totalSuccess, totalCompletionDuration)
 
 	log.Printf("===== Load Test Finished =====")
-	log.Printf("Total Sent Envelopes: %d", router.reqSent.Load())
-	log.Printf("Total Success Responses: %d", router.respRecv.Load())
+	log.Printf("Generation Duration: %s", generationDuration)
+	log.Printf("Drain Duration: %s", drainDuration)
+	log.Printf("Total Completion Duration: %s", totalCompletionDuration)
+	log.Printf("Offered TPS: %.2f", offeredTPS)
+	log.Printf("Completed TPS: %.2f", completedTPS)
+	log.Printf("Total Sent Envelopes: %d", totalSent)
+	log.Printf("Total Success Responses: %d", totalSuccess)
 	log.Printf("Total Errors: %d", router.errCount.Load())
 	log.Printf("Drain Complete: %t", drained)
 	log.Printf("InFlight Unfinished: %d", abandoned)
@@ -116,6 +147,9 @@ func (e *StressEngine) Start(cfg stressConfig) error {
 
 	if e.running.Load() {
 		return errAlreadyRunning
+	}
+	if err := cfg.normalize(); err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -139,7 +173,7 @@ func (e *StressEngine) Start(cfg stressConfig) error {
 		defer stopRun()
 
 		runStressGenerators(runCtx, e.router, cfg)
-		drainInFlight(e.router, 5*time.Second)
+		drainInFlight(e.router, cfg.drainWindow)
 		e.currentTPS.Store(0)
 	}()
 
@@ -211,6 +245,7 @@ func runStressGenerators(ctx context.Context, router *Router, cfg stressConfig) 
 		pacing = time.Nanosecond
 	}
 
+	uidSpan := cfg.uidMax - cfg.uidMin + 1
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.concurrency; i++ {
 		wg.Add(1)
@@ -226,7 +261,7 @@ func runStressGenerators(ctx context.Context, router *Router, cfg stressConfig) 
 					return
 				case <-ticker.C:
 					reqID := nextRequestID()
-					uid := rand.Int63n(100) + 1
+					uid := cfg.uidMin + rand.Int63n(uidSpan)
 					payloadBuf := make([]byte, 8)
 					binary.BigEndian.PutUint64(payloadBuf, 1)
 					env := &pb.RemoteEnvelope{
@@ -243,6 +278,23 @@ func runStressGenerators(ctx context.Context, router *Router, cfg stressConfig) 
 		}()
 	}
 	wg.Wait()
+}
+
+func (cfg *stressConfig) normalize() error {
+	if cfg.drainWindow <= 0 {
+		cfg.drainWindow = 60 * time.Second
+	}
+	if cfg.uidMin == 0 && cfg.uidMax == 0 {
+		cfg.uidMin = 1
+		cfg.uidMax = 100
+	}
+	if cfg.uidMin <= 0 {
+		return fmt.Errorf("uid-min must be > 0")
+	}
+	if cfg.uidMax < cfg.uidMin {
+		return fmt.Errorf("uid-max must be >= uid-min")
+	}
+	return nil
 }
 
 func drainInFlight(router *Router, timeout time.Duration) (drained bool, unfinished uint64) {
@@ -328,4 +380,11 @@ func diffErrorBreakdown(curr, base map[string]uint64) map[string]uint64 {
 		out[key] = value - baseValue
 	}
 	return out
+}
+
+func throughputPerSecond(total uint64, d time.Duration) float64 {
+	if d <= 0 {
+		return 0
+	}
+	return float64(total) / d.Seconds()
 }

@@ -36,9 +36,12 @@ type executeRequest struct {
 }
 
 type stressRequest struct {
-	TPSTarget   int `json:"tps_target"`
-	Concurrency int `json:"concurrency"`
-	DurationSec int `json:"duration_sec"`
+	TPSTarget      int   `json:"tps_target"`
+	Concurrency    int   `json:"concurrency"`
+	DurationSec    int   `json:"duration_sec"`
+	DrainWindowSec int   `json:"drain_window_sec"`
+	UIDMin         int64 `json:"uid_min"`
+	UIDMax         int64 `json:"uid_max"`
 }
 
 type gatewayServer struct {
@@ -142,6 +145,9 @@ func (s *gatewayServer) handleStressStart(w http.ResponseWriter, r *http.Request
 		tpsTarget:   req.TPSTarget,
 		concurrency: req.Concurrency,
 		duration:    time.Duration(req.DurationSec) * time.Second,
+		drainWindow: time.Duration(req.DrainWindowSec) * time.Second,
+		uidMin:      req.UIDMin,
+		uidMax:      req.UIDMax,
 	}
 	if err := s.engine.Start(cfg); err != nil {
 		if errors.Is(err, errAlreadyRunning) {
@@ -488,6 +494,9 @@ const gatewayHTML = `<!doctype html>
           <label>TPS Target <input type="number" name="tps_target" min="1" value="50000"></label>
           <label>Concurrency <input type="number" name="concurrency" min="1" value="5000"></label>
           <label>Duration (sec) <input type="number" name="duration_sec" min="1" value="30"></label>
+          <label>Drain Window (sec) <input type="number" name="drain_window_sec" min="1" value="60"></label>
+          <label>UID Min <input type="number" name="uid_min" min="1" value="1"></label>
+          <label>UID Max <input type="number" name="uid_max" min="1" value="100"></label>
           <button type="submit">Launch Load Test</button>
           <button type="button" class="stop" id="stopBtn">Stop</button>
           <button type="button" id="resetBtn">Clear Metrics</button>
@@ -569,6 +578,9 @@ const gatewayHTML = `<!doctype html>
       body.tps_target = Number(body.tps_target);
       body.concurrency = Number(body.concurrency);
       body.duration_sec = Number(body.duration_sec);
+      body.drain_window_sec = Number(body.drain_window_sec);
+      body.uid_min = Number(body.uid_min);
+      body.uid_max = Number(body.uid_max);
       const res = await fetch("/api/stress/start", {
         method: "POST",
         headers: {"Content-Type": "application/json"},

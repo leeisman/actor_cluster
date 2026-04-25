@@ -1,4 +1,4 @@
-.PHONY: kind-up recreate-kind status-kind deploy-infra wait-infra init-db port-forward install-ingress images verify-kind-images docker-build deploy-node redeploy-node refresh-nodes deploy-gateway redeploy-gateway gateway-url gateway-logs bootstrap-gateway bootstrap-all load-test deploy-monitoring redeploy-monitoring migrate-kube-state-metrics-if-needed migrate-legacy-monitoring-ingress monitoring-port-forward monitoring-urls clean
+.PHONY: kind-up recreate-kind status-kind deploy-infra wait-infra init-db reset-db port-forward install-ingress images verify-kind-images docker-build deploy-node redeploy-node refresh-nodes deploy-gateway redeploy-gateway gateway-url gateway-logs bootstrap-gateway bootstrap-all load-test deploy-monitoring redeploy-monitoring migrate-kube-state-metrics-if-needed migrate-legacy-monitoring-ingress monitoring-port-forward monitoring-urls clean
 
 CLUSTER_NAME=actor-cluster
 MONITORING_DIR := deploy/monitoring
@@ -72,6 +72,16 @@ init-db:
 	done
 	kubectl exec -i cassandra-0 -- cqlsh -e "CREATE KEYSPACE IF NOT EXISTS wallet WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}; USE wallet; CREATE TABLE IF NOT EXISTS wallet_events (tenant_id int, uid bigint, version bigint, created_at timestamp, tx_id text, delta_amount bigint, payload blob, PRIMARY KEY ((tenant_id, uid), version)) WITH CLUSTERING ORDER BY (version ASC); CREATE TABLE IF NOT EXISTS wallet_snapshots (tenant_id int, uid bigint, balance bigint, last_version bigint, PRIMARY KEY ((tenant_id, uid)));"
 	@echo "Database Initialized."
+
+reset-db:
+	@echo "Resetting Cassandra wallet test data..."
+	@echo "Waiting for Cassandra native transport..."
+	@until kubectl exec -i cassandra-0 -- cqlsh -e "DESCRIBE KEYSPACES" >/dev/null 2>&1; do \
+		echo "  Cassandra is not ready for cqlsh yet; retrying in 3s..."; \
+		sleep 3; \
+	done
+	kubectl exec -i cassandra-0 -- cqlsh -e "CREATE KEYSPACE IF NOT EXISTS wallet WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}; USE wallet; TRUNCATE wallet_events; TRUNCATE wallet_snapshots;"
+	@echo "Database reset complete."
 
 port-forward:
 	@echo "Forwarding ports for Hybrid Development Mode..."

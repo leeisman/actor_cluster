@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
+	"sync/atomic"
 )
 
 // ErrEmptyBatch indicates a caller attempted to execute an empty persistence batch.
@@ -16,6 +17,14 @@ var ErrEmptyBatch = fmt.Errorf("persistence: statements slice must not be empty"
 type CassandraStore struct {
 	session *gocql.Session
 }
+
+// processPersistenceWriteDurationNsSum / processPersistenceWriteDurationNsCount
+// track cumulative Cassandra batch-write time inside the current node process.
+// They are process-local aggregates, not per-actor and not cluster-global.
+var (
+	processPersistenceWriteDurationNsSum   atomic.Uint64
+	processPersistenceWriteDurationNsCount atomic.Uint64
+)
 
 // NewCassandraStore creates and verifies a Cassandra session.
 func NewCassandraStore(hosts []string, keyspace string) (*CassandraStore, error) {
@@ -51,7 +60,11 @@ func (s *CassandraStore) ExecuteBatch(ctx context.Context, mode BatchMode, state
 		})
 	}
 
-	if err := s.session.ExecuteBatch(batch); err != nil {
+	writeStart := time.Now()
+	err := s.session.ExecuteBatch(batch)
+	processPersistenceWriteDurationNsSum.Add(uint64(time.Since(writeStart)))
+	processPersistenceWriteDurationNsCount.Add(1)
+	if err != nil {
 		return fmt.Errorf("persistence: ExecuteBatch failed: %w", err)
 	}
 	return nil
@@ -74,4 +87,16 @@ func toGocqlBatchType(mode BatchMode) gocql.BatchType {
 		return gocql.LoggedBatch
 	}
 	return gocql.UnloggedBatch
+}
+
+// ProcessPersistenceWriteDurationNsSum returns cumulative batch-write time
+// (nanoseconds) since this process started.
+func ProcessPersistenceWriteDurationNsSum() uint64 {
+	return processPersistenceWriteDurationNsSum.Load()
+}
+
+// ProcessPersistenceWriteDurationNsCount returns cumulative ExecuteBatch call count
+// since this process started.
+func ProcessPersistenceWriteDurationNsCount() uint64 {
+	return processPersistenceWriteDurationNsCount.Load()
 }

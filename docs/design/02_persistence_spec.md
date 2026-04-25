@@ -118,7 +118,71 @@ cmd/node
 
 ---
 
-## 6. 避坑紀錄 (Pitfalls & Workarounds)
+## 6. Persistence Write 耗時聚合埋點
+
+為了在 load test 期間區分：
+
+- Actor `Handle()` 整體成本
+- Cassandra batch write 成本
+
+`pkg/persistence` 額外暴露一組 **process-local cumulative counters**。
+
+對外名稱：
+
+```text
+node_persistence_write_duration_ns_sum
+node_persistence_write_duration_ns_count
+```
+
+程式內語意：
+
+- 在 `ExecuteBatch(...)` 內，以 `time.Now()` / `time.Since()` 包住實際 Cassandra batch write
+- `node_persistence_write_duration_ns_sum`：
+  - 自 process 啟動以來，所有 `ExecuteBatch()` 累計耗時（nanoseconds）
+- `node_persistence_write_duration_ns_count`：
+  - 自 process 啟動以來，`ExecuteBatch()` 總呼叫次數
+
+這兩個值**不是**：
+
+- 單次 request latency
+- process lifetime 的預先平均值
+- per-actor / per-tenant / per-uid 指標
+
+設計原因：
+
+- 不在 Go code 內直接輸出平均值
+- 用 `sum/count` raw counter 形狀，和 `Handle()` 耗時對照
+- 可用於判斷 `Handle()` 平均時間是否主要被 Cassandra write 拖慢
+
+例如查最近 1 分鐘平均 batch write 耗時（ms）：
+
+```promql
+rate(node_persistence_write_duration_ns_sum[1m]) / clamp_min(rate(node_persistence_write_duration_ns_count[1m]), 1e-9) / 1e6
+```
+
+觀測上可直接比較：
+
+- `node_handle_duration...`
+- `node_persistence_write_duration...`
+- `node_actor_mailbox_pending`
+
+若：
+
+- `Handle()` 平均明顯升高
+- `Persistence write` 平均也同步升高
+
+則 Cassandra 很可能是主要成本來源之一。
+
+若：
+
+- `Handle()` 平均升高
+- `Persistence write` 平均沒有同步升高
+
+則瓶頸更可能在 actor business logic、熱點分布、serialization 或其他非 persistence 路徑。
+
+---
+
+## 7. 避坑紀錄 (Pitfalls & Workarounds)
 
 - **不要把業務 event 放在 `pkg/persistence`**：`WalletEvent`、balance、TxID、version 都是業務語義，應在 `internal/node`。
 - **不要讓 persistence 做 partition guard**：跨 partition batch 是否非法取決於上層 schema；`pkg/persistence` 只執行 statement。

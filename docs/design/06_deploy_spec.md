@@ -111,6 +111,16 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
    - **用途**：建立 `wallet` keyspace 與 `wallet_events`, `wallet_snapshots` schema。
    - **穩定性**：Makefile 會先等待 Cassandra 的 native transport 可被 `cqlsh` 連上，再真正執行 schema 初始化，避免 Cassandra 剛完成 rollout 但 `9042` 尚未開始接受連線時的初始化失敗。
 
+9.1 **`make reset-db`**：
+   - **用途**：只清空本地 Cassandra 中的壓測資料，不重建 kind cluster。
+   - **行為**：
+     - 先等待 Cassandra 的 native transport 可被 `cqlsh` 連上。
+     - 確保 `wallet` keyspace 存在。
+     - 對 `wallet_events`、`wallet_snapshots` 執行 `TRUNCATE`。
+   - **適用情境**：
+     - 本地反覆跑 `make load-test` 後，想清掉累積的 event / snapshot 資料。
+     - 想保留既有 cluster、ingress、gateway、monitoring，不想每次都 `make clean`。
+
 10. **`make images`** / **`make docker-build`**：
    - **`make images`**：只在本機 Docker 建出 `actor:latest`（node）與 `actor-client:latest`（client），**不**載入 kind。
    - **`make docker-build`**：等同 `images` + 對叢集 **`actor-cluster` 執行 `kind load`**，並執行 **`make verify-kind-images`**。
@@ -142,6 +152,11 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 14. **`make clean`**：
    - **用途**：刪除整個 kind cluster。
 
+14.1 **本地 Cassandra 容量管理建議**：
+   - 本專案的本地 Cassandra 主要用於開發與壓測，不是長期持久化環境。
+   - 若反覆壓測造成資料量膨脹，應優先考慮 **`make reset-db`** 清空測試資料。
+   - 只有在需要完全重建 cluster 狀態時，再使用 **`make clean`**。
+
 ### 4.8 Monitoring Baseline（Prometheus / Grafana）
 
 15. **目標**：
@@ -169,7 +184,7 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
      - `prometheus.yaml`（Prometheus `Deployment` + `Service`）
      - `kube-state-metrics.yaml`（`ServiceAccount`、`ClusterRole`、`ClusterRoleBinding`、`Deployment`、`Service`）
      - `node-exporter.yaml`（`DaemonSet` + `Service`）
-     - `grafana.yaml`（Grafana datasource provisioning `ConfigMap`、`Deployment`、`Service`）
+     - `grafana.yaml`（Grafana datasource provisioning `ConfigMap`、dashboard provider `ConfigMap`、built-in dashboard `ConfigMap`、`Deployment`、`Service`）
      - `ingress.yaml`（**`Ingress` 名稱：`monitoring-ui`**；`grafana.localhost` / `prometheus.localhost`，**需已執行** `make install-ingress`；與舊版 `Ingress/monitoring` 二選一，`deploy-monitoring` 會刪除後者以免 nginx admission 重複 host）
 
 18. **入口設計**：
@@ -184,7 +199,7 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 19. **Makefile 建議入口**（已實作於專案根目錄 `Makefile`）：
    - `make deploy-monitoring`
      - 依序 `kubectl apply` 上述 manifest（`kube-state-metrics` 前有 **selector 遷移**：若現有 `Deployment/kube-state-metrics` 的 `spec.selector` 不是 `app=kube-state-metrics`，則**只刪除該 Deployment** 再 apply，避免 immutable selector 造成 apply 失敗；`ingress.yaml` 前會 **`kubectl delete ingress/monitoring`**（`--ignore-not-found`）以免與 `monitoring-ui` 重複綁定相同 host）。
-     - 由於 `prometheus-config.yaml` / Grafana datasource provisioning 都來自 ConfigMap，這條會額外 `rollout restart`：
+     - 由於 `prometheus-config.yaml` / Grafana datasource provisioning / dashboard provisioning 都來自 ConfigMap，這條會額外 `rollout restart`：
        - `deployment/prometheus`
        - `deployment/grafana`
      - 最後等待 `prometheus`、`kube-state-metrics`、`grafana` rollout 與 `node-exporter` DaemonSet 就緒，並列印 `make monitoring-urls` 的提示。
@@ -198,20 +213,32 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 20. **與 `bootstrap-all` 的關係**：
    - `make bootstrap-all` **不包含** monitoring；叢集起來後若要觀測底座，請另執行 `make install-ingress`（若要走 Ingress）與 `make deploy-monitoring`。
 
-21. **這一版刻意不做的事情**：
+21. **Grafana 內建 dashboard（目前已實作一份最小版）**：
+   - Grafana 會自動 provision `Actor Cluster` folder，其中包含 `Actor and Persistence Avg` dashboard。
+   - 目前內建 panel：
+     - `Handle vs Persistence Calls Per Second`
+     - `Handle vs Persistence Avg (1m, ms)`
+     - `Handle - Persistence Gap (1m, ms)`
+     - `Actor Mailbox Pending`
+   - dashboard 原始 JSON 追蹤於：
+     - `deploy/monitoring/actor-persistence-dashboard.json`
+   - 這份 dashboard 的定位是：
+     - 用最少幾個 application metrics，快速回答「actor handle 成本是否主要由 persistence write 主導」。
+
+22. **這一版刻意不做的事情**：
    - 不先引入大量 `cmd/client` / `internal/node` / `pkg/actor` 的 Prometheus 埋點
    - 不先定義 AI bottleneck analysis
-   - 不先要求 Grafana dashboard 一定完整自動 provisioning
+   - 不先做大量、產品化的 dashboard catalog；目前只提供一份最小診斷 dashboard
    - 不先做 eBPF / deep tracing
 
-22. **工程取捨**：
+23. **工程取捨**：
    - 先把 Prometheus / Grafana 部署進來，目的是建立觀測底座。
    - 真正的 application metrics 必須等我們先釐清：
      - 要回答什麼問題
      - 哪些指標值得長期維護
    - 否則容易在代碼內埋入過量、低價值且高維護成本的 metrics。
 
-23. **目前已存在的最小 application metric**：
+24. **目前已存在的最小 application metric**：
    - 雖然 baseline 原則是不先大量主導 app 埋點，但目前 `actor-node` 已額外提供：
      - `node_actor_mailbox_pending`
    - 這個值代表 **單一 node process 內所有 actor mailbox 的 pending envelope 總量**，用來觀察壓測下 actor backlog 是否升高、以及停止送流量後是否回落。

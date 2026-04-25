@@ -232,6 +232,67 @@ node_actor_mailbox_pending
 這個埋點屬於 runtime 可觀測性的一部分，但**不改變 Actor 語義**；
 它只做計數，不參與 routing、ownership、業務規則、persistence 或 backpressure 決策。
 
+判讀上，`node_actor_mailbox_pending` 對 workload 熱點分布敏感：
+
+- 在少量 UID / 高集中度壓測下，同一批 hot actor 更容易形成單 goroutine serialization backlog，因此該值通常更容易升高。
+- 在大量 UID / 較分散的 workload 下，即使整體吞吐很高，該值也可能維持低值或接近 `0`。
+
+因此，這個指標更適合用來判斷：
+
+- actor 端是否出現 hot spot backlog
+- 單 actor 序列化是否開始成為瓶頸
+
+而不應單獨被解讀成整體系統吞吐上限。
+
+### 3.5 Handle 耗時聚合埋點
+
+為了在 load test 期間觀察 Actor `Handle()` 整體成本，
+runtime 額外暴露一組 **process-local cumulative counters**。
+
+#### Handle timing
+
+對外名稱：
+
+```text
+node_handle_duration_ns_sum
+node_handle_duration_ns_count
+```
+
+程式內語意：
+
+- 在 `Actor.loop()` 內，以 `time.Now()` / `time.Since()` 包住 `a.handler.Handle(env)`
+- `node_handle_duration_ns_sum`：
+  - 自 process 啟動以來，所有 `Handle()` 累計耗時（nanoseconds）
+- `node_handle_duration_ns_count`：
+  - 自 process 啟動以來，`Handle()` 總呼叫次數
+
+這兩個值**不是**：
+
+- 單一 actor 的 Handle 耗時
+- 單次 request latency
+- process lifetime 的預先平均值
+
+設計原因：
+
+- 不在 Go code 內直接輸出 `avg`，避免前幾輪較快的 load test 稀釋後面較慢的 run
+- Prometheus / Grafana 可用 windowed query 算出「最近 1 分鐘」或「最近 5 分鐘」的平均 Handle 耗時
+
+例如查最近 1 分鐘平均 `Handle()` 耗時（ms）：
+
+```promql
+rate(node_handle_duration_ns_sum[1m]) / clamp_min(rate(node_handle_duration_ns_count[1m]), 1e-9) / 1e6
+```
+
+Persistence write 耗時埋點定義於
+[02_persistence_spec.md](/Users/frankieli/Documents/frankie/github/actor_cluster/docs/design/02_persistence_spec.md)。
+實際診斷時，通常會對照：
+
+- `node_handle_duration...`
+- `node_persistence_write_duration...`
+- `node_actor_mailbox_pending`
+
+來判斷 Handle 變慢時，是否主要由 Cassandra write 拖慢。
+
 ---
 
 ## 4. Event Loop

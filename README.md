@@ -201,6 +201,17 @@ kubectl get pods -n monitoring
 - **Ingress** (`Ingress/monitoring-ui` in namespace `monitoring`): [http://grafana.localhost/](http://grafana.localhost/) and [http://prometheus.localhost/](http://prometheus.localhost/) (Grafana login defaults: `admin` / `admin`). `make deploy-monitoring` removes a legacy `Ingress/monitoring` in that namespace if present so host rules are not duplicated.
 - **Port-forward** (no ingress): `make monitoring-port-forward` then open [http://127.0.0.1:3000](http://127.0.0.1:3000) and [http://127.0.0.1:9090](http://127.0.0.1:9090).
 
+Grafana also provisions one built-in dashboard folder, `Actor Cluster`, containing `Actor and Persistence Avg`, which includes:
+
+- `Handle vs Persistence Calls Per Second`
+- `Handle vs Persistence Avg (1m, ms)`
+- `Handle - Persistence Gap (1m, ms)`
+- `Actor Mailbox Pending`
+
+The source JSON for this dashboard is tracked in:
+
+- [`deploy/monitoring/actor-persistence-dashboard.json`](deploy/monitoring/actor-persistence-dashboard.json)
+
 Sanity checks in the Prometheus UI: queries such as `kube_pod_status_phase` (kube-state-metrics) and `node_cpu_seconds_total` (node-exporter).
 
 ```bash
@@ -227,6 +238,27 @@ make port-forward
 go run ./cmd/node
 go run ./cmd/client serve
 ```
+
+### Reset local Cassandra test data
+
+If repeated load tests make the local Cassandra dataset too large, you can clear only the wallet test tables without rebuilding the whole kind cluster:
+
+```bash
+make reset-db
+```
+
+This truncates:
+
+- `wallet.wallet_events`
+- `wallet.wallet_snapshots`
+
+Use this when you want to keep:
+
+- the current kind cluster
+- ingress / monitoring
+- deployed node and gateway
+
+but remove accumulated benchmark data before the next load test.
 
 ### What `bootstrap-all` actually does
 

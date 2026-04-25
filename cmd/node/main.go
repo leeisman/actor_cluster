@@ -202,4 +202,20 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP node_actor_mailbox_pending Total number of envelopes currently waiting across all actor mailboxes within this node process.\n")
 	fmt.Fprintf(w, "# TYPE node_actor_mailbox_pending gauge\n")
 	fmt.Fprintf(w, "node_actor_mailbox_pending %d\n", actor.ProcessMailboxPending())
+
+	fmt.Fprintf(w, "# HELP node_handle_duration_ns_sum Cumulative total nanoseconds spent inside handler.Handle(env) in this node process.\n")
+	fmt.Fprintf(w, "# TYPE node_handle_duration_ns_sum counter\n")
+	fmt.Fprintf(w, "node_handle_duration_ns_sum %d\n", actor.ProcessHandleDurationNsSum())
+
+	fmt.Fprintf(w, "# HELP node_handle_duration_ns_count Total number of handler.Handle(env) calls in this node process.\n")
+	fmt.Fprintf(w, "# TYPE node_handle_duration_ns_count counter\n")
+	fmt.Fprintf(w, "node_handle_duration_ns_count %d\n", actor.ProcessHandleDurationNsCount())
+
+	fmt.Fprintf(w, "# HELP node_persistence_write_duration_ns_sum Cumulative total nanoseconds spent inside persistence ExecuteBatch() in this node process.\n")
+	fmt.Fprintf(w, "# TYPE node_persistence_write_duration_ns_sum counter\n")
+	fmt.Fprintf(w, "node_persistence_write_duration_ns_sum %d\n", persistence.ProcessPersistenceWriteDurationNsSum())
+
+	fmt.Fprintf(w, "# HELP node_persistence_write_duration_ns_count Total number of persistence ExecuteBatch() calls in this node process.\n")
+	fmt.Fprintf(w, "# TYPE node_persistence_write_duration_ns_count counter\n")
+	fmt.Fprintf(w, "node_persistence_write_duration_ns_count %d\n", persistence.ProcessPersistenceWriteDurationNsCount())
 }

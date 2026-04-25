@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	pb "github.com/frankieli/actor_cluster/pkg/remote/pb"
 )
@@ -43,6 +44,14 @@ var envelopePool = &sync.Pool{
 // actor mailboxes inside the current node process. It is process-local, not
 // per-actor and not cluster-global.
 var processMailboxPending atomic.Uint64
+
+// processHandleDurationNsCount / processHandleDurationNsSum 記錄每次
+// handler.Handle() 的呼叫次數與累計耗時（nanoseconds）。
+// 設計與 processMailboxPending 一致：process-local aggregate、atomic、無鎖。
+var (
+	processHandleDurationNsCount atomic.Uint64
+	processHandleDurationNsSum   atomic.Uint64
+)
 
 // GetEnvelope exposes pooled envelopes for advanced zero-allocation adapters.
 func GetEnvelope() *Envelope {
@@ -234,7 +243,10 @@ func (a *Actor) loop(ctx context.Context) {
 		}
 
 		env := qnode.Msg
+		handleStart := time.Now()
 		result := a.handler.Handle(env)
+		processHandleDurationNsSum.Add(uint64(time.Since(handleStart)))
+		processHandleDurationNsCount.Add(1)
 		if result != nil {
 			completeResult(result, env)
 			a.sink.Emit(result)
@@ -265,4 +277,15 @@ func completeResult(result *pb.RemoteResult, env *pb.RemoteEnvelope) {
 
 func ProcessMailboxPending() uint64 {
 	return processMailboxPending.Load()
+}
+
+// ProcessHandleDurationNsSum 回傳自 process 啟動以來所有 handler.Handle()
+// 的累計耗時（nanoseconds）。
+func ProcessHandleDurationNsSum() uint64 {
+	return processHandleDurationNsSum.Load()
+}
+
+// ProcessHandleDurationNsCount 回傳自 process 啟動以來的 Handle() 總呼叫次數。
+func ProcessHandleDurationNsCount() uint64 {
+	return processHandleDurationNsCount.Load()
 }

@@ -20,11 +20,11 @@
   - **避坑紀錄 (Caveat)**: etcd lease (預設 5s) 的存活狀態極度依賴網路穩定度，本地 `kind` 應避免賦予過低的資源配置導致 etcd 頻繁觸發 Leader Election 或 Timeout 造成腦裂。
 
 ### 2.2 Cassandra (Event Store)
-- **類型**: 部署為單節點 `StatefulSet` + `Headless Service`，映像與 **`deploy/infra/cassandra.yaml` 一致**（目前為 `cassandra:latest`；本地可調 `MAX_HEAP_SIZE` 等 env）。
+- **類型**: 部署為單節點 `StatefulSet` + `Headless Service`，映像與 **`deploy/infra/cassandra.yaml` 一致**（目前固定為 `cassandra:4.1`；本地可調 `MAX_HEAP_SIZE` 等 env）。
 - **持久化**: 掛載本機 `kind` 節點內的 `hostPath` 或 K8s `emptyDir` (若接受重啟掉資料)，以模擬 LSM-Tree 的高效磁碟 Append 操作。
 - **初始化 (Migration)**:
   - 透過 `Makefile` 提供的 `make init-db` 指令，手動連入 Cassandra 執行 `cqlsh` 建立 `wallet` Keyspace 與 `wallet_events`, `wallet_snapshots` Schema。
-  - **效能考量**: 應調低本地 C* 的 `MAX_HEAP_SIZE` (如 512M) 並調整 commit log 寫入模式，以避免開發環境吃光 RAM。
+  - **效能考量**: 本地 kind / Docker Desktop 以穩定為先，應調低本地 C* 的 `MAX_HEAP_SIZE` (如 512M) 與 `HEAP_NEWSIZE` (如 100M)，避免在開發環境出現過度吃 RAM 或 JVM 啟動不穩。
 
 ## 3. Actor Node K8s 部署整合 (Actor Node Integration)
 
@@ -33,11 +33,19 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 - **環境變數與參數（以 `deploy/node.yaml` 為準）**:
   - **`POD_IP`**：必須從 `fieldRef: fieldPath: status.podIP` 注入；`cmd/node` 的 `resolveMyIP` 優先序為 `--ip` → `POD_IP` → UDP 探測。
   - **etcd / Cassandra 位址**：透過 **container `args`** 傳入（與本機 `go run` 的 flag 一致），例如 `-etcd=etcd-client:2379`、`-cassandra=cassandra-0.cassandra-headless.default.svc.cluster.local:9042`；**不**另設 `CASSANDRA_HOST` / `ETCD_ENDPOINTS` 等額外 env（避免文檔與 manifest 漂移）。
+  - **metrics 位址**：Node 另外透過 **container `args`** 傳入 `-metrics=:9090`，提供 node-local `/metrics` HTTP endpoint。
 - **優雅停機 (Graceful Shutdown)**:
   - Pod 的 `terminationGracePeriodSeconds` 與 **`deploy/node.yaml` 一致**（目前為 **45s**）。
   - 根據 `#04_go_guidelines` 的分段退役策略，Node 在收到 `SIGTERM` 時，將依序與 etcd 發起 `Deregister`，並停止 TCP Server 接收新流量，隨後排空內部 MPSC 進行 Cassandra flush 操作。K8s 強制發送 SIGKILL 前必須保留足夠時間讓記憶體內的 Buffer 安全落盤。
 - **連接埠 (Ports)**:
   - Pod 明確曝露 `50051` Port 作為 gRPC 傳輸層。
+  - Pod 額外曝露 `9090` Port 作為 node metrics endpoint。
+- **Prometheus Pod Annotations**:
+  - `deploy/node.yaml` 目前會標記：
+    - `prometheus.io/scrape: "true"`
+    - `prometheus.io/path: "/metrics"`
+    - `prometheus.io/port: "9090"`
+  - 讓 Prometheus 以 pod annotation discovery 直接抓取 node metrics，而不需額外建立專用 metrics Service。
 
 ## 4. 自動化建置流與操作指南 (Bootstrap Workflow & Operations)
 
@@ -109,10 +117,20 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 
 11. **`make deploy-node`**：
    - **用途**：部署 Actor Node。
-   - **補充**：若 image tag 未變（仍為 `actor:latest`），改完 code 後需額外執行 **`make redeploy-node`** 或 **`make refresh-nodes`** 才會真的換成新 binary。
+   - **補充**：
+     - 這條會先 `kubectl apply -f deploy/node.yaml`，因此適合 manifest / args / annotations 有變動時使用。
+     - 若 image tag 未變（仍為 `actor:latest`），改完 code 後需額外執行 **`make redeploy-node`** 或 **`make refresh-nodes`** 才會真的換成新 binary。
+
+11.1 **`make redeploy-node`**：
+   - **用途**：在 kind 內已 load 新 image 後，重啟 `actor-node` deployment。
+   - **現行行為**：
+     - 會先重新 `apply deploy/node.yaml`
+     - 再 `rollout restart deployment/actor-node`
+   - 這樣即使 `deploy/node.yaml` 的 args / ports / annotations 有變更，也不會只重啟舊 manifest。
 
 12. **`make load-test`**：
    - **用途**：以 K8s Job 方式啟動 `cmd/client stress ...`，做真實內網壓測。
+   - **支援參數**：可從 Makefile 傳入 `TPS`、`CONCURRENCY`、`BATCH`、`DURATION`、`DRAIN_WINDOW`、`UID_MIN`、`UID_MAX`，對應 `cmd/client stress` 的 CLI flags。
 
 ### 4.6 單機極速開發 (Hybrid Mode)
 
@@ -139,6 +157,7 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
    - `Grafana`
    - `kube-state-metrics`
    - `node-exporter`
+   - 帶有 `prometheus.io/scrape=true` 的 annotated pods（目前包含 `actor-node`）
 
 17. **部署位置**：
    - 建議獨立使用 `monitoring` namespace，避免與 `default` 業務元件混在一起。
@@ -165,6 +184,9 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 19. **Makefile 建議入口**（已實作於專案根目錄 `Makefile`）：
    - `make deploy-monitoring`
      - 依序 `kubectl apply` 上述 manifest（`kube-state-metrics` 前有 **selector 遷移**：若現有 `Deployment/kube-state-metrics` 的 `spec.selector` 不是 `app=kube-state-metrics`，則**只刪除該 Deployment** 再 apply，避免 immutable selector 造成 apply 失敗；`ingress.yaml` 前會 **`kubectl delete ingress/monitoring`**（`--ignore-not-found`）以免與 `monitoring-ui` 重複綁定相同 host）。
+     - 由於 `prometheus-config.yaml` / Grafana datasource provisioning 都來自 ConfigMap，這條會額外 `rollout restart`：
+       - `deployment/prometheus`
+       - `deployment/grafana`
      - 最後等待 `prometheus`、`kube-state-metrics`、`grafana` rollout 與 `node-exporter` DaemonSet 就緒，並列印 `make monitoring-urls` 的提示。
    - `make redeploy-monitoring`
      - 與 `deploy-monitoring` 相同（idempotent 重套 manifest）。
@@ -188,6 +210,11 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
      - 要回答什麼問題
      - 哪些指標值得長期維護
    - 否則容易在代碼內埋入過量、低價值且高維護成本的 metrics。
+
+23. **目前已存在的最小 application metric**：
+   - 雖然 baseline 原則是不先大量主導 app 埋點，但目前 `actor-node` 已額外提供：
+     - `node_actor_mailbox_pending`
+   - 這個值代表 **單一 node process 內所有 actor mailbox 的 pending envelope 總量**，用來觀察壓測下 actor backlog 是否升高、以及停止送流量後是否回落。
 
 ### 4.9 避坑紀錄
 

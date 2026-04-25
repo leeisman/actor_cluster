@@ -26,11 +26,11 @@ spec:
     spec:
       containers:
       - name: cassandra
-        image: cassandra:latest
+        image: cassandra:4.1
         env:
         - name: MAX_HEAP_SIZE
-          value: "1024M" # 本地開發極低消耗設定
+          value: "512M" # kind / Docker Desktop 本地開發保守設定，先求穩定
         - name: HEAP_NEWSIZE
-          value: "200M"
+          value: "100M"
         ports:
         - containerPort: 9042

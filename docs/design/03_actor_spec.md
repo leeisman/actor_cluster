@@ -189,6 +189,49 @@ default:
 此 channel 不是 mailbox，只是喚醒信號。
 核心 message queue 仍是 MPSC。
 
+### 3.4 Mailbox 聚合埋點
+
+`pkg/actor` 目前維護一個 **process-local aggregate gauge**，用來描述：
+
+- **當前 node process 內**
+- **所有 actor mailbox**
+- **尚未被 dequeue 的 envelope 總數**
+
+對外名稱：
+
+```text
+node_actor_mailbox_pending
+```
+
+程式內語意：
+
+- 以 package-level atomic 變數 `processMailboxPending` 維護
+- `sendEnvelope` enqueue 成功時 `+1`
+- `dequeue` 取出 envelope 時 `-1`
+- `Drain()` 清理 mailbox 殘留時也必須 `-1`
+
+這個值**不是**：
+
+- per-actor mailbox 深度
+- per-tenant / per-uid 指標
+- cluster-global 指標
+
+而是：
+
+- **單一 node process 的總 mailbox backlog**
+
+設計原因：
+
+- 我們在 load test / Grafana 上想先回答的是「actor 端是否正在累積 backlog」
+- 不需要一開始就引入高 cardinality 的 per-actor metrics
+- process-level aggregate 足以觀察：
+  - 壓測期間 backlog 是否升高
+  - 停止送流量後是否能回落到接近 `0`
+  - 是否存在長時間不下降、疑似 stuck / leak 的情況
+
+這個埋點屬於 runtime 可觀測性的一部分，但**不改變 Actor 語義**；
+它只做計數，不參與 routing、ownership、業務規則、persistence 或 backpressure 決策。
+
 ---
 
 ## 4. Event Loop

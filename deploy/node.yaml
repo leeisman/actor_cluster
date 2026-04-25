@@ -11,13 +11,17 @@ spec:
     metadata:
       labels:
         app: actor-node
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "9090"
     spec:
       terminationGracePeriodSeconds: 45 # 延長優雅停機，給予 Actor 充足時間 Drain Queue 落檔
       containers:
       - name: node
         image: actor:latest
         imagePullPolicy: IfNotPresent
-        args: ["-port=:50051", "-etcd=etcd-client:2379", "-cassandra=cassandra-0.cassandra-headless.default.svc.cluster.local:9042"]
+        args: ["-port=:50051", "-metrics=:9090", "-etcd=etcd-client:2379", "-cassandra=cassandra-0.cassandra-headless.default.svc.cluster.local:9042"]
         env:
         - name: POD_IP # 注入核心：利用 CNI 真實 IP 註冊給 etcd 進行 1024 槽位路由
           valueFrom:
@@ -30,3 +34,4 @@ spec:
             memory: "512Mi"
         ports:
         - containerPort: 50051
+        - containerPort: 9090

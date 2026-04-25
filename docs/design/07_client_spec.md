@@ -44,6 +44,14 @@ go run ./cmd/client stress -tps 50000 -concurrency 5000 -duration 30s
 - 依 `tps / concurrency` 限速產生大量 `RemoteEnvelope`。
 - 每筆請求只記錄 latency 起點，不建立等待 channel。
 - 背景由 `ReceiverLoop` 收到 `BatchResponse` 後更新 success / error / latency metrics。
+- 目前 `stress` 另支援：
+  - `-drain-window`
+  - `-uid-min`
+  - `-uid-max`
+
+其中：
+- `drain-window`：停止送流量後，最多再等待多久讓 in-flight 請求排空。
+- `uid-min` / `uid-max`：控制壓測隨機 `uid` 範圍，用來模擬熱點 workload 與較分散 workload。
 
 ### 2.2 `serve`
 
@@ -147,6 +155,20 @@ type callbackEntry struct {
 - `serve`：`respCh != nil`
 
 這讓同一條 transport 同時支撐高吞吐壓測與同步 HTTP 玩家請求，而不需要分裂兩套 client stack。
+
+另外，`ShardedCallbackMap` 目前維護一個 **process-local aggregate counter**：
+
+```text
+CallbackPending
+```
+
+語意是：
+- 當前 `cmd/client` process 內
+- 所有 streamer callback map 尚未完成的 pending request 總數
+
+用途：
+- 在 `stress` / `load-test` log 中觀察 client 端 callback backlog 是否持續累積
+- 協助區分「actor 端 backlog」與「client completion/bookkeeping backlog」
 
 ## 4. 併發與資料流
 
@@ -303,6 +325,11 @@ Request:
 }
 ```
 
+注意：
+- `total_sent` / `total_success` / `total_errors` 是累積值
+- `current_tps` 是近一秒的 send TPS
+- 它不等於「完整完成吞吐量」
+
 ### 5.6 `POST /api/stress/reset`
 
 用途：清除 dashboard 上目前的累積 metrics，方便比較下一批測試。
@@ -374,6 +401,37 @@ Request:
 
 - 必須移除該 `request_id` 對應的 pending callback
 - 不可留下 memory leak
+
+### 7.4 Load-Test 結束語意
+
+`stress` / `make load-test` 結束時，目前會額外輸出：
+
+- `Generation Duration`
+- `Drain Duration`
+- `Total Completion Duration`
+- `Offered TPS`
+- `Completed TPS`
+- `Callback Map Pending`
+- `Drain Complete`
+- `InFlight Unfinished`
+
+定義：
+
+- `Generation Duration`
+  - 真正送流量的時間（例如 30s）
+- `Drain Duration`
+  - 停止送流量後，等待 in-flight 排空所花的時間
+- `Total Completion Duration`
+  - `Generation Duration + Drain Duration`
+- `Offered TPS`
+  - `total_sent / generation_duration`
+- `Completed TPS`
+  - `total_success / total_completion_duration`
+
+重要：
+- 當 `Drain Complete = true` 時，`Completed TPS` 可視為「這批 workload 被完整消化後的吞吐量」
+- 當 `Drain Complete = false` 時，`Completed TPS` 只代表「在 drain window 內已完成部分的平均吞吐量」，**不是最終完整吞吐量**
+- `InFlight Unfinished > 0` 時，表示仍有 request 未完成；這些未完成請求不會被算進 `total_success`
 
 ## 8. 工程規則與避坑
 

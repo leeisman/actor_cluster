@@ -92,12 +92,13 @@ func runStressCommand(args []string) error {
 		cfg.uidMax,
 		cfg.drainWindow,
 	)
-	stopMetrics := startMetricsReporter(ctx, router, func(sentTPS, successTPS, errorTPS, inFlight uint64) {
-		log.Printf("Live: Sent(TPS): %d | Success(TPS): %d | Error(TPS): %d | InFlight: %d | Totals sent=%d success=%d error=%d",
+	stopMetrics := startMetricsReporter(ctx, router, func(sentTPS, successTPS, errorTPS, inFlight, callbackPending uint64) {
+		log.Printf("Live: Sent(TPS): %d | Success(TPS): %d | Error(TPS): %d | InFlight: %d | CallbackPending: %d | Totals sent=%d success=%d error=%d",
 			sentTPS,
 			successTPS,
 			errorTPS,
 			inFlight,
+			callbackPending,
 			router.reqSent.Load(),
 			router.respRecv.Load(),
 			router.errCount.Load(),
@@ -127,6 +128,7 @@ func runStressCommand(args []string) error {
 	log.Printf("Total Completion Duration: %s", totalCompletionDuration)
 	log.Printf("Offered TPS: %.2f", offeredTPS)
 	log.Printf("Completed TPS: %.2f", completedTPS)
+	log.Printf("Callback Map Pending: %d", router.CallbackPending())
 	log.Printf("Total Sent Envelopes: %d", totalSent)
 	log.Printf("Total Success Responses: %d", totalSuccess)
 	log.Printf("Total Errors: %d", router.errCount.Load())
@@ -164,7 +166,7 @@ func (e *StressEngine) Start(cfg stressConfig) error {
 		defer close(done)
 		defer e.running.Store(false)
 
-		stopMetrics := startMetricsReporter(ctx, e.router, func(sentTPS, _, _, _ uint64) {
+		stopMetrics := startMetricsReporter(ctx, e.router, func(sentTPS, _, _, _, _ uint64) {
 			e.currentTPS.Store(sentTPS)
 		})
 		defer stopMetrics()
@@ -314,7 +316,7 @@ func drainInFlight(router *Router, timeout time.Duration) (drained bool, unfinis
 	}
 }
 
-func startMetricsReporter(ctx context.Context, router *Router, onTick func(sentTPS, successTPS, errorTPS, inFlight uint64)) func() {
+func startMetricsReporter(ctx context.Context, router *Router, onTick func(sentTPS, successTPS, errorTPS, inFlight, callbackPending uint64)) func() {
 	stop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(time.Second)
@@ -341,10 +343,11 @@ func startMetricsReporter(ctx context.Context, router *Router, onTick func(sentT
 				if currSent > handled {
 					inFlight = currSent - handled
 				}
+				callbackPending := router.CallbackPending()
 				lastSent = currSent
 				lastSuccess = currSuccess
 				lastErrors = currErrors
-				onTick(sentTPS, successTPS, errorTPS, inFlight)
+				onTick(sentTPS, successTPS, errorTPS, inFlight, callbackPending)
 			}
 		}
 	}()

@@ -19,6 +19,7 @@ type callbackEntry struct {
 
 // ShardedCallbackMap 避免 global map lock contention
 type ShardedCallbackMap struct {
+	pending atomic.Uint64
 	shards [256]struct {
 		sync.RWMutex
 		m map[uint64]callbackEntry
@@ -37,6 +38,9 @@ func (sm *ShardedCallbackMap) Store(reqID uint64, entry callbackEntry) {
 	shardIdx := reqID % 256
 	s := &sm.shards[shardIdx]
 	s.Lock()
+	if _, exists := s.m[reqID]; !exists {
+		sm.pending.Add(1)
+	}
 	s.m[reqID] = entry
 	s.Unlock()
 }
@@ -48,6 +52,7 @@ func (sm *ShardedCallbackMap) LoadAndDelete(reqID uint64) (callbackEntry, bool) 
 	entry, ok := s.m[reqID]
 	if ok {
 		delete(s.m, reqID)
+		sm.pending.Add(^uint64(0))
 	}
 	s.Unlock()
 	return entry, ok
@@ -57,7 +62,10 @@ func (sm *ShardedCallbackMap) Delete(reqID uint64) {
 	shardIdx := reqID % 256
 	s := &sm.shards[shardIdx]
 	s.Lock()
-	delete(s.m, reqID)
+	if _, exists := s.m[reqID]; exists {
+		delete(s.m, reqID)
+		sm.pending.Add(^uint64(0))
+	}
 	s.Unlock()
 }
 
@@ -77,9 +85,14 @@ func (sm *ShardedCallbackMap) FailAll(router *Router, errCode string) {
 				}
 			}
 			delete(s.m, reqID)
+			sm.pending.Add(^uint64(0))
 		}
 		s.Unlock()
 	}
+}
+
+func (sm *ShardedCallbackMap) Pending() uint64 {
+	return sm.pending.Load()
 }
 
 type Router struct {
@@ -286,4 +299,13 @@ func (r *Router) StopAll() {
 		ns.StopAndWait()
 		return true
 	})
+}
+
+func (r *Router) CallbackPending() uint64 {
+	var total uint64
+	r.streamers.Range(func(key, value interface{}) bool {
+		total += value.(*NodeStreamer).callbackMap.Pending()
+		return true
+	})
+	return total
 }

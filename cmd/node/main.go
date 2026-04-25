@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/frankieli/actor_cluster/internal/node"
+	"github.com/frankieli/actor_cluster/pkg/actor"
 	"github.com/frankieli/actor_cluster/pkg/discovery" // NewEtcdRegistry + NewEtcdResolver + Watch；查表=TopologyResolver.GetNodeIP（與 cmd/client 同契約，見 docs/design/01_discovery_spec.md §14）
 	"github.com/frankieli/actor_cluster/pkg/persistence"
 	"github.com/frankieli/actor_cluster/pkg/remote"
@@ -66,6 +68,7 @@ func resolveMyIP(flagIP, port string) (string, error) {
 
 func main() {
 	port := flag.String("port", ":50051", "gRPC server listen address (e.g. :50051)")
+	metricsAddr := flag.String("metrics", ":9090", "HTTP metrics listen address (e.g. :9090)")
 	myIP := flag.String("ip", "", "advertised host:port for etcd registration; auto-detected if empty")
 	cassHosts := flag.String("cassandra", "127.0.0.1", "comma-separated Cassandra hosts")
 	keyspace := flag.String("keyspace", "wallet", "Cassandra keyspace")
@@ -148,6 +151,20 @@ func main() {
 		}
 	}()
 
+	metricsMux := http.NewServeMux()
+	metricsMux.HandleFunc("/metrics", handleMetrics)
+	metricsServer := &http.Server{
+		Addr:              *metricsAddr,
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		log.Printf("metrics server listening on %s\n", *metricsAddr)
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			panic(err)
+		}
+	}()
+
 	// ── 7. Graceful Shutdown ─────────────────────────────────────────────────
 	//
 	// 關機順序（由上游往下游切斷，Pipeline 分段關閉）：
@@ -164,8 +181,25 @@ func main() {
 		log.Printf("Deregister warning: %v", err)
 	}
 
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("metrics shutdown warning: %v", err)
+	}
+
 	grpcServer.GracefulStop()
 	appNode.Stop()
 
 	log.Println("Server stopped gracefully.")
+}
+
+func handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintf(w, "# HELP node_actor_mailbox_pending Total number of envelopes currently waiting across all actor mailboxes within this node process.\n")
+	fmt.Fprintf(w, "# TYPE node_actor_mailbox_pending gauge\n")
+	fmt.Fprintf(w, "node_actor_mailbox_pending %d\n", actor.ProcessMailboxPending())
 }

@@ -130,6 +130,7 @@ deploy-node:
 # 單跑：make redeploy-node
 redeploy-node:
 	@echo "Rolling restart deployment/actor-node (2 replicas) to pick up re-loaded image..."
+	kubectl apply -f deploy/node.yaml
 	kubectl rollout restart deployment/actor-node
 	kubectl rollout status deployment/actor-node --timeout=180s
 
@@ -212,6 +213,8 @@ deploy-monitoring redeploy-monitoring:
 	@for f in $(MONITORING_AFTER_KSM); do kubectl apply -f $(MONITORING_DIR)/$$f; done
 	@$(MAKE) --no-print-directory migrate-legacy-monitoring-ingress
 	@kubectl apply -f $(MONITORING_DIR)/ingress.yaml
+	kubectl rollout restart deployment/prometheus -n monitoring
+	kubectl rollout restart deployment/grafana -n monitoring
 	kubectl rollout status deployment/prometheus -n monitoring --timeout=180s
 	kubectl rollout status deployment/kube-state-metrics -n monitoring --timeout=180s
 	kubectl rollout status deployment/grafana -n monitoring --timeout=180s

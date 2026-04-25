@@ -39,6 +39,11 @@ var envelopePool = &sync.Pool{
 	},
 }
 
+// processMailboxPending tracks the total number of queued envelopes across all
+// actor mailboxes inside the current node process. It is process-local, not
+// per-actor and not cluster-global.
+var processMailboxPending atomic.Uint64
+
 // GetEnvelope exposes pooled envelopes for advanced zero-allocation adapters.
 func GetEnvelope() *Envelope {
 	return envelopePool.Get().(*Envelope)
@@ -123,6 +128,7 @@ func (a *Actor) SendEnvelope(env *Envelope) bool {
 
 func (a *Actor) sendEnvelope(env *Envelope) {
 	env.next.Store(nil)
+	processMailboxPending.Add(1)
 	prev := a.tail.Swap(env)
 	prev.next.Store(env)
 	select {
@@ -186,6 +192,7 @@ func (a *Actor) Drain() []*pb.RemoteEnvelope {
 		envs = append(envs, next.Msg)
 		next.Msg = nil // clear reference before this node becomes the new dummy
 		a.head.Store(next)
+		processMailboxPending.Add(^uint64(0))
 		PutEnvelope(head)
 	}
 	return envs
@@ -201,6 +208,7 @@ func (a *Actor) dequeue() *Envelope {
 		return nil
 	}
 	a.head.Store(next)
+	processMailboxPending.Add(^uint64(0))
 	PutEnvelope(head)
 	return next
 }
@@ -253,4 +261,8 @@ func completeResult(result *pb.RemoteResult, env *pb.RemoteEnvelope) {
 	if result.OpCode == 0 {
 		result.OpCode = env.OpCode
 	}
+}
+
+func ProcessMailboxPending() uint64 {
+	return processMailboxPending.Load()
 }

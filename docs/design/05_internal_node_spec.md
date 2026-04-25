@@ -125,14 +125,15 @@ Step 2：SELECT version, tx_id, delta_amount FROM wallet_events
 1. now := time.Now()；lastActive.Store(now.UnixNano())
 2. 防重放：txCache 命中 → Success=true, Payload=空（CQRS：txCache 無法重建原始結算 balance，
    回傳當前 balance 會產生語義歧義；需要 balance 走獨立 read path）
-3. 解 payload → amount（Big-Endian int64）
-4. 記憶體守門：balance + amount >= 0，否則 `ERR_INSUFFICIENT_FUNDS`（`pkg/remote/errors.go`）
-5. nextVersion := version + 1
-6. 盲寫：INSERT INTO wallet_events (tenant_id, uid, version, created_at, tx_id, delta_amount, payload)
+3. Payload 格式檢查：len(payload) < 8 → ERR_INVALID_PAYLOAD（int64 Big-Endian 需 8 bytes）
+4. 解 payload → amount（Big-Endian int64）
+5. 記憶體守門：balance + amount >= 0，否則 `ERR_INSUFFICIENT_FUNDS`（`pkg/remote/errors.go`）
+6. nextVersion := version + 1
+7. 盲寫：INSERT INTO wallet_events (tenant_id, uid, version, created_at, tx_id, delta_amount, payload)
          VALUES (?, ?, nextVersion, now, txID, amount, payload)  // 無 LWT/CAS
-7. balance += amount；version = nextVersion
-8. addTxID(txID)（Ring Buffer 淘汰 + 插入）
-9. eventCount++；若 >= 1000 → takeSnapshotAsync()；eventCount = 0
+8. balance += amount；version = nextVersion
+9. addTxID(txID)（Ring Buffer 淘汰 + 插入）
+10. eventCount++；若 >= 1000 → takeSnapshotAsync()；eventCount = 0
 ```
 
 ### 4.4 TxID Cache 輔助方法

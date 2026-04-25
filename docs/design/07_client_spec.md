@@ -86,13 +86,17 @@ type Router struct {
     batchSize  int
     flushDelay time.Duration
 
-    streamers sync.Map // map[string]*NodeStreamer
+    streamers sync.Map  // map[string]*NodeStreamer
+    mu        sync.Mutex // 保護 getStreamer 的 double-check lock
 
+    // Metrics
     reqSent        atomic.Uint64
     respRecv       atomic.Uint64
     errCount       atomic.Uint64
     latencyNanos   atomic.Uint64
     latencySamples atomic.Uint64
+
+    errBreakdown sync.Map // map[string]*atomic.Uint64；error code 細分統計
 }
 ```
 

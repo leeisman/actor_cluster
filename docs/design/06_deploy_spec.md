@@ -117,9 +117,13 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
      - 先等待 Cassandra 的 native transport 可被 `cqlsh` 連上。
      - 確保 `wallet` keyspace 存在。
      - 對 `wallet_events`、`wallet_snapshots` 執行 `TRUNCATE`。
+     - 再執行 `nodetool clearsnapshot wallet`，減少 `TRUNCATE` 後舊 snapshot 仍占用本地磁碟的情況。
    - **適用情境**：
      - 本地反覆跑 `make load-test` 後，想清掉累積的 event / snapshot 資料。
      - 想保留既有 cluster、ingress、gateway、monitoring，不想每次都 `make clean`。
+   - **限制**：
+     - 這條會明顯比單純 `TRUNCATE` 更接近「清乾淨」，但仍不等於整個 kind cluster 重建。
+     - 若 Docker / kind 底層 storage 已嚴重碎裂或被其他資料吃滿，仍可能需要 `make clean` + `make bootstrap-all`。
 
 10. **`make images`** / **`make docker-build`**：
    - **`make images`**：只在本機 Docker 建出 `actor:latest`（node）與 `actor-client:latest`（client），**不**載入 kind。
@@ -140,7 +144,18 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
 
 12. **`make load-test`**：
    - **用途**：以 K8s Job 方式啟動 `cmd/client stress ...`，做真實內網壓測。
-   - **支援參數**：可從 Makefile 傳入 `TPS`、`CONCURRENCY`、`BATCH`、`DURATION`、`DRAIN_WINDOW`、`UID_MIN`、`UID_MAX`，對應 `cmd/client stress` 的 CLI flags。
+   - **支援參數**：可從 Makefile 傳入 `TPS`、`CONCURRENCY`、`BATCH`、`FLUSH_DELAY`、`DURATION`、`DRAIN_WINDOW`、`UID_MIN`、`UID_MAX`，對應 `cmd/client stress` 的 CLI flags。
+   - **補充**：
+     - `BATCH` 直接對應 `-batch`，用來控制單次送往 node 的最大 envelope 批次大小。
+     - `FLUSH_DELAY` 直接對應 `-flush-delay`，用來控制未滿 batch 最多等待多久就強制送出。
+
+12.1 **`make stop-load-test` / `make stop-all-load-tests`**：
+   - **用途**：停止 cluster 內仍在執行的 load-generator Job。
+   - **背景**：
+     - `make load-test` 啟動的是 Kubernetes Job，即使本地 terminal session 結束，Job 仍可能繼續執行。
+   - **指令**：
+     - `make stop-load-test JOB_ID=<n>`：刪除單一 `actor-load-generator-<n>` Job 與其 Pod。
+     - `make stop-all-load-tests`：刪除所有 `actor-load-generator-*` Job 與其對應 Pod。
 
 ### 4.6 單機極速開發 (Hybrid Mode)
 

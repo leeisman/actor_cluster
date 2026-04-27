@@ -21,6 +21,7 @@ type clientConfig struct {
 	etcdEndpoints string
 	nodePrefix    string
 	batchSize     int
+	flushDelay    time.Duration
 }
 
 var reqIDGenerator atomic.Uint64
@@ -59,7 +60,8 @@ func main() {
 func registerSharedFlags(fs *flag.FlagSet, cfg *clientConfig) {
 	fs.StringVar(&cfg.etcdEndpoints, "etcd", "127.0.0.1:2379", "comma-separated etcd endpoints")
 	fs.StringVar(&cfg.nodePrefix, "node-prefix", "/actor_cluster/nodes", "etcd key prefix")
-	fs.IntVar(&cfg.batchSize, "batch", 1000, "max batch size for sending")
+	fs.IntVar(&cfg.batchSize, "batch", 2000, "max batch size for sending")
+	fs.DurationVar(&cfg.flushDelay, "flush-delay", defaultFlushDelay, "max time to wait before flushing a partially filled batch")
 }
 
 func newRouterFromConfig(ctx context.Context, cfg clientConfig) (*Router, func(), error) {
@@ -78,7 +80,7 @@ func newRouterFromConfig(ctx context.Context, cfg clientConfig) (*Router, func()
 		return nil, nil, fmt.Errorf("resolver watch failed: %w", err)
 	}
 
-	router := NewRouter(resolver, cfg.batchSize, defaultFlushDelay)
+	router := NewRouter(resolver, cfg.batchSize, cfg.flushDelay)
 	cleanup := func() {
 		router.StopAll()
 		etcdCli.Close()

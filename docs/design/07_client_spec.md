@@ -100,6 +100,34 @@ type Router struct {
 }
 ```
 
+`batchSize` 來自共用 CLI flag：
+
+```bash
+-batch=2000
+```
+
+在 `make load-test` 中可透過：
+
+```bash
+BATCH=2000
+```
+
+覆寫，用來調整每次送往單一 node 的最大批次大小。
+
+`flushDelay` 同樣來自共用 CLI flag：
+
+```bash
+-flush-delay=5ms
+```
+
+在 `make load-test` 中可透過：
+
+```bash
+FLUSH_DELAY=5ms
+```
+
+覆寫，用來控制未滿 batch 最多等待多久就強制 flush。
+
 它提供兩種送法：
 
 - `EmulateGatewayFlow(...)`
@@ -140,6 +168,21 @@ type NodeStreamer struct {
 
 這是 `cmd/client` 高併發下的重要設計原則：**goroutine 數量與目標 node 數量成正比，而不是與 request 數量成正比**。
 
+另外，`NodeStreamer` 對 transport failure 採 **fail-fast + replace** 策略：
+
+1. 若 `stream.Send()` 或 `stream.Recv()` 發生 error，當前 `NodeStreamer` 會將自己標記為 `dead`
+2. 這條 stream 底下尚未完成的 pending callback 會直接以 transport error 收斂
+3. 舊 `grpcConn` / `stream` / `context` 會被關閉
+4. `Router` 會將該 `NodeStreamer` 從目標 IP 對應表中移除
+5. 後續新 request 再打到同一個 target node 時，由 `Router` 建立新的 `NodeStreamer`
+
+這代表：
+
+- **新 request** 具備基本自癒能力
+- **舊 in-flight request** 若 response path 已斷，則直接視為失敗，不在 transport 層偷偷重送
+
+重試責任留給上層（例如 gateway / client），並依 `request_id` / `tx_id` 的去重語意決定是否安全重送。
+
 ### 3.3 Sharded Callback Map
 
 `ShardedCallbackMap` 採 256 shards，key 為全域唯一 `request_id`。
@@ -170,9 +213,29 @@ CallbackPending
 - 當前 `cmd/client` process 內
 - 所有 streamer callback map 尚未完成的 pending request 總數
 
+需要注意的是，`CallbackPending` 的語意**比** `InFlight` 更寬：
+
+- `CallbackPending`
+  - 只要 request 已經建立 callback entry，就會計入
+  - 因此同時包含：
+    - 已成功送上 gRPC stream、正在等待 response 的 request
+    - 尚未真正送出、但已卡在 `NodeStreamer.envelopeCh` / batch pipeline 內等待 flush 的 request
+- `InFlight`
+  - 目前僅以 `reqSent - (respRecv + errCount)` 推導
+  - 只代表「已成功送上 wire，但尚未被 success / error 收斂」的 request
+
+因此在高壓或 transport 失敗場景下，兩者**不保證永遠相等**。
+
 用途：
 - 在 `stress` / `load-test` log 中觀察 client 端 callback backlog 是否持續累積
 - 協助區分「actor 端 backlog」與「client completion/bookkeeping backlog」
+
+在 CLI summary 與 live log 中，這個值目前會以較明確的人類可讀名稱輸出為：
+
+```text
+PendingCallbacks(total)
+Pending Callbacks (total)
+```
 
 ## 4. 併發與資料流
 
@@ -410,6 +473,7 @@ Request:
 
 `stress` / `make load-test` 結束時，目前會額外輸出：
 
+- `Config`
 - `Generation Duration`
 - `Drain Duration`
 - `Total Completion Duration`
@@ -421,6 +485,14 @@ Request:
 
 定義：
 
+- `Config`
+  - 印出本輪實際使用的：
+    - `tps`
+    - `concurrency`
+    - `batch`
+    - `duration`
+    - `drain_window`
+    - `uid_range`
 - `Generation Duration`
   - 真正送流量的時間（例如 30s）
 - `Drain Duration`
@@ -433,6 +505,14 @@ Request:
   - `total_success / total_completion_duration`
 
 重要：
+
+補充：
+
+- `make load-test` 啟動的是 **K8s Job**，不是綁定在本地 terminal session 上的前景程序。
+- 因此即使本地 terminal 離開，cluster 內的 load-generator 仍可能繼續執行。
+- 為了明確停止壓測，Makefile 提供：
+  - `make stop-load-test JOB_ID=<n>`
+  - `make stop-all-load-tests`
 - 當 `Drain Complete = true` 時，`Completed TPS` 可視為「這批 workload 被完整消化後的吞吐量」
 - 當 `Drain Complete = false` 時，`Completed TPS` 只代表「在 drain window 內已完成部分的平均吞吐量」，**不是最終完整吞吐量**
 - `InFlight Unfinished > 0` 時，表示仍有 request 未完成；這些未完成請求不會被算進 `total_success`

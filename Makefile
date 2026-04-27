@@ -1,4 +1,4 @@
-.PHONY: kind-up recreate-kind status-kind deploy-infra wait-infra init-db reset-db port-forward install-ingress images verify-kind-images docker-build deploy-node redeploy-node refresh-nodes deploy-gateway redeploy-gateway gateway-url gateway-logs bootstrap-gateway bootstrap-all load-test deploy-monitoring redeploy-monitoring migrate-kube-state-metrics-if-needed migrate-legacy-monitoring-ingress monitoring-port-forward monitoring-urls clean
+.PHONY: kind-up recreate-kind status-kind deploy-infra wait-infra init-db reset-db port-forward install-ingress images verify-kind-images docker-build deploy-node redeploy-node refresh-nodes deploy-gateway redeploy-gateway gateway-url gateway-logs bootstrap-gateway bootstrap-all load-test stop-load-test stop-all-load-tests deploy-monitoring redeploy-monitoring migrate-kube-state-metrics-if-needed migrate-legacy-monitoring-ingress monitoring-port-forward monitoring-urls clean
 
 CLUSTER_NAME=actor-cluster
 MONITORING_DIR := deploy/monitoring
@@ -81,6 +81,8 @@ reset-db:
 		sleep 3; \
 	done
 	kubectl exec -i cassandra-0 -- cqlsh -e "CREATE KEYSPACE IF NOT EXISTS wallet WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}; USE wallet; TRUNCATE wallet_events; TRUNCATE wallet_snapshots;"
+	@echo "Clearing Cassandra snapshots for keyspace 'wallet'..."
+	kubectl exec -i cassandra-0 -- nodetool clearsnapshot --all wallet >/dev/null
 	@echo "Database reset complete."
 
 port-forward:
@@ -186,6 +188,7 @@ JOB_ID ?= 1
 TPS ?= 100000
 CONCURRENCY ?= 5000
 BATCH ?= 2000
+FLUSH_DELAY ?= 5ms
 DURATION ?= 30s
 DRAIN_WINDOW ?= 60s
 UID_MIN ?= 1
@@ -194,11 +197,25 @@ UID_MAX ?= 100
 load-test:
 	@echo "Spawning Client Load Generator Job-$(JOB_ID) inside K8s..."
 	@kubectl delete job actor-load-generator-$(JOB_ID) --ignore-not-found
-	@sed 's/name: actor-load-generator/name: actor-load-generator-$(JOB_ID)/; s/app: load-generator/app: load-generator-$(JOB_ID)/; s/-tps=100000/-tps=$(TPS)/; s/-concurrency=5000/-concurrency=$(CONCURRENCY)/; s/-batch=2000/-batch=$(BATCH)/; s/-duration=30s/-duration=$(DURATION)/; s/-drain-window=60s/-drain-window=$(DRAIN_WINDOW)/; s/-uid-min=1/-uid-min=$(UID_MIN)/; s/-uid-max=100/-uid-max=$(UID_MAX)/' deploy/client-job.yaml | kubectl apply -f -
+	@sed 's/name: actor-load-generator/name: actor-load-generator-$(JOB_ID)/; s/app: load-generator/app: load-generator-$(JOB_ID)/; s/-tps=100000/-tps=$(TPS)/; s/-concurrency=5000/-concurrency=$(CONCURRENCY)/; s/-batch=2000/-batch=$(BATCH)/; s/-flush-delay=5ms/-flush-delay=$(FLUSH_DELAY)/; s/-duration=30s/-duration=$(DURATION)/; s/-drain-window=60s/-drain-window=$(DRAIN_WINDOW)/; s/-uid-min=1/-uid-min=$(UID_MIN)/; s/-uid-max=100/-uid-max=$(UID_MAX)/' deploy/client-job.yaml | kubectl apply -f -
 	@echo "Waiting for Pod to spin up..."
 	@sleep 2
 	kubectl logs -l app=load-generator-$(JOB_ID) -f
 	@echo "Check real-time TPS with: kubectl logs -l app=load-generator -f"
+
+stop-load-test:
+	@echo "Stopping Client Load Generator Job-$(JOB_ID)..."
+	@kubectl delete job actor-load-generator-$(JOB_ID) --ignore-not-found
+	@kubectl delete pod -l app=load-generator-$(JOB_ID) --ignore-not-found
+
+stop-all-load-tests:
+	@echo "Stopping all actor-load-generator jobs..."
+	@for job in $$(kubectl get jobs -o name 2>/dev/null | grep '^job.batch/actor-load-generator-' || true); do \
+		kubectl delete "$$job" --ignore-not-found; \
+	done
+	@for label in $$(kubectl get pods -o jsonpath='{range .items[*]}{.metadata.labels.app}{"\n"}{end}' 2>/dev/null | grep '^load-generator-' || true); do \
+		kubectl delete pod -l app=$$label --ignore-not-found; \
+	done
 
 # Monitoring baseline (Prometheus / Grafana / kube-state-metrics / node-exporter). Does not deploy app metrics.
 # Ingress hosts require a prior `make install-ingress` (same as actor gateway).

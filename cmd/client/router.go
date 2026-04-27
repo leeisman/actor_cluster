@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -127,6 +128,7 @@ func (r *Router) getStreamer(ip string) *NodeStreamer {
 		if !ns.IsDead() {
 			return ns
 		}
+		log.Printf("[Router] Evicting dead streamer for %s", ip)
 		r.streamers.Delete(ip)
 	}
 
@@ -139,9 +141,11 @@ func (r *Router) getStreamer(ip string) *NodeStreamer {
 		if !ns.IsDead() {
 			return ns
 		}
+		log.Printf("[Router] Evicting dead streamer for %s (double-check)", ip)
 		r.streamers.Delete(ip)
 	}
 
+	log.Printf("[Router] Creating new streamer for %s", ip)
 	ns, err := NewNodeStreamer(
 		ip,
 		r.batchSize,
@@ -149,6 +153,7 @@ func (r *Router) getStreamer(ip string) *NodeStreamer {
 		r,
 	)
 	if err != nil {
+		log.Printf("[Router] Failed to create streamer for %s: %v", ip, err)
 		return nil
 	}
 	r.streamers.Store(ip, ns)
@@ -157,6 +162,7 @@ func (r *Router) getStreamer(ip string) *NodeStreamer {
 
 func (r *Router) evictStreamer(ip string, ns *NodeStreamer) {
 	if val, ok := r.streamers.Load(ip); ok && val == ns {
+		log.Printf("[Router] Evicted streamer for %s", ip)
 		r.streamers.Delete(ip)
 	}
 }

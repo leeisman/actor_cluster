@@ -150,7 +150,14 @@ make load-test
 For local throughput validation, the recommended path is the in-cluster load generator:
 
 ```bash
-make load-test TPS=100000 CONCURRENCY=5000 DURATION=30s DRAIN_WINDOW=60s UID_MIN=1 UID_MAX=256
+make load-test TPS=100000 CONCURRENCY=5000 BATCH=2000 FLUSH_DELAY=5ms DURATION=30s DRAIN_WINDOW=60s UID_MIN=1 UID_MAX=256
+```
+
+If a load-generator keeps running inside the cluster after your local terminal session is gone, stop it with:
+
+```bash
+make stop-load-test JOB_ID=1
+make stop-all-load-tests
 ```
 
 This measures the **cluster-internal** path:
@@ -166,6 +173,15 @@ load-generator job
 
 Key fields in the final summary:
 
+- `Config`
+  - Prints the effective load-test parameters for that run:
+    - `tps`
+    - `concurrency`
+    - `batch`
+    - `flush_delay`
+    - `duration`
+    - `drain_window`
+    - `uid_range`
 - `Offered TPS`
   - `total_sent / generation_duration`
   - How fast the load generator pushed work into the system.
@@ -178,6 +194,17 @@ Key fields in the final summary:
   - Remaining requests not completed before the drain window expired.
 - `Callback Map Pending`
   - Client-side pending callbacks still waiting for completion.
+
+Common knobs:
+
+- `TPS`
+- `CONCURRENCY`
+- `BATCH`
+- `FLUSH_DELAY`
+- `DURATION`
+- `DRAIN_WINDOW`
+- `UID_MIN`
+- `UID_MAX`
 
 Interpretation notes:
 
@@ -252,6 +279,8 @@ This truncates:
 - `wallet.wallet_events`
 - `wallet.wallet_snapshots`
 
+It also clears Cassandra snapshots for the `wallet` keyspace, so local disk usage is less likely to remain inflated after repeated load tests.
+
 Use this when you want to keep:
 
 - the current kind cluster
@@ -259,6 +288,8 @@ Use this when you want to keep:
 - deployed node and gateway
 
 but remove accumulated benchmark data before the next load test.
+
+Note: this is much lighter than `make clean`, but it still does not guarantee the same level of disk reclamation as destroying and recreating the whole kind cluster.
 
 ### What `bootstrap-all` actually does
 

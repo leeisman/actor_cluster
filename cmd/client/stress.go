@@ -85,15 +85,17 @@ func runStressCommand(args []string) error {
 	defer cleanup()
 
 	log.Printf(
-		"Starting Load Generator: target %d TPS, concurrency %d, uid range [%d,%d], drain window %s",
+		"Starting Load Generator: target %d TPS, concurrency %d, batch %d, flush delay %s, uid range [%d,%d], drain window %s",
 		cfg.tpsTarget,
 		cfg.concurrency,
+		cfg.batchSize,
+		cfg.flushDelay,
 		cfg.uidMin,
 		cfg.uidMax,
 		cfg.drainWindow,
 	)
 	stopMetrics := startMetricsReporter(ctx, router, func(sentTPS, successTPS, errorTPS, inFlight, callbackPending uint64) {
-		log.Printf("Live: Sent(TPS): %d | Success(TPS): %d | Error(TPS): %d | InFlight: %d | CallbackPending: %d | Totals sent=%d success=%d error=%d",
+		log.Printf("Live: Sent(TPS): %d | Success(TPS): %d | Error(TPS): %d | InFlight: %d | PendingCallbacks(total): %d | Totals sent=%d success=%d error=%d",
 			sentTPS,
 			successTPS,
 			errorTPS,
@@ -123,12 +125,22 @@ func runStressCommand(args []string) error {
 	completedTPS := throughputPerSecond(totalSuccess, totalCompletionDuration)
 
 	log.Printf("===== Load Test Finished =====")
+	log.Printf("Config: tps=%d concurrency=%d batch=%d flush_delay=%s duration=%s drain_window=%s uid_range=[%d,%d]",
+		cfg.tpsTarget,
+		cfg.concurrency,
+		cfg.batchSize,
+		cfg.flushDelay,
+		cfg.duration,
+		cfg.drainWindow,
+		cfg.uidMin,
+		cfg.uidMax,
+	)
 	log.Printf("Generation Duration: %s", generationDuration)
 	log.Printf("Drain Duration: %s", drainDuration)
 	log.Printf("Total Completion Duration: %s", totalCompletionDuration)
 	log.Printf("Offered TPS: %.2f", offeredTPS)
 	log.Printf("Completed TPS: %.2f", completedTPS)
-	log.Printf("Callback Map Pending: %d", router.CallbackPending())
+	log.Printf("Pending Callbacks (total): %d", router.CallbackPending())
 	log.Printf("Total Sent Envelopes: %d", totalSent)
 	log.Printf("Total Success Responses: %d", totalSuccess)
 	log.Printf("Total Errors: %d", router.errCount.Load())

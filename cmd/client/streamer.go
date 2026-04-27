@@ -31,8 +31,9 @@ type NodeStreamer struct {
 	stopCh chan struct{}
 	done   chan struct{}
 
-	failOnce sync.Once
-	dead     atomic.Bool
+	failOnce  sync.Once
+	closeOnce sync.Once
+	dead      atomic.Bool
 }
 
 func NewNodeStreamer(
@@ -70,15 +71,16 @@ func NewNodeStreamer(
 		done:        make(chan struct{}),
 	}
 
+	log.Printf("[Streamer %s] StreamMessages connected", ip)
 	go ns.flusherLoop()
 	go ns.receiverLoop()
 
 	return ns, nil
 }
 
-func (ns *NodeStreamer) sendBatch(batch []*pb.RemoteEnvelope) {
+func (ns *NodeStreamer) sendBatch(batch []*pb.RemoteEnvelope) bool {
 	if len(batch) == 0 {
-		return
+		return true
 	}
 	req := &pb.BatchRequest{Envelopes: batch}
 	if err := ns.stream.Send(req); err != nil {
@@ -86,9 +88,11 @@ func (ns *NodeStreamer) sendBatch(batch []*pb.RemoteEnvelope) {
 			log.Printf("[Streamer %s] Send error: %v", ns.TargetIP, err)
 		}
 		ns.fail(remote.ErrTransportClosed)
+		return false
 	} else {
 		ns.router.reqSent.Add(uint64(len(batch)))
 	}
+	return true
 }
 
 func (ns *NodeStreamer) flusherLoop() {
@@ -103,19 +107,28 @@ func (ns *NodeStreamer) flusherLoop() {
 		case <-ns.ctx.Done():
 			return
 		case <-ns.stopCh:
-			ns.sendBatch(batch)
-			ns.stream.CloseSend() // 關閉送出流，通知 Server EOF
+			if !ns.sendBatch(batch) {
+				return
+			}
+			_ = ns.stream.CloseSend() // 關閉送出流，通知 Server EOF
 			return
-		case env := <-ns.envelopeCh:
+		case env, ok := <-ns.envelopeCh:
+			if !ok || env == nil {
+				return
+			}
 			batch = append(batch, env)
 			if len(batch) >= ns.targetSize {
-				ns.sendBatch(batch)
+				if !ns.sendBatch(batch) {
+					return
+				}
 				batch = batch[:0] // Retain capacity
 				ticker.Reset(ns.flushDelay)
 			}
 		case <-ticker.C:
 			if len(batch) > 0 {
-				ns.sendBatch(batch)
+				if !ns.sendBatch(batch) {
+					return
+				}
 				batch = batch[:0]
 			}
 		}
@@ -130,6 +143,10 @@ func (ns *NodeStreamer) receiverLoop() {
 		resp, err := ns.stream.Recv()
 		if err != nil {
 			if err == io.EOF {
+				if ns.ctx.Err() == nil {
+					log.Printf("[Streamer %s] Recv EOF; marking streamer dead", ns.TargetIP)
+					ns.fail(remote.ErrTransportClosed)
+				}
 				return
 			}
 			log.Printf("[Streamer %s] Recv error: %v", ns.TargetIP, err)
@@ -176,9 +193,20 @@ func (ns *NodeStreamer) IsDead() bool {
 
 func (ns *NodeStreamer) fail(errCode string) {
 	ns.failOnce.Do(func() {
+		pending := ns.callbackMap.Pending()
+		log.Printf("[Streamer %s] Marking dead: err=%s pending_callbacks=%d", ns.TargetIP, errCode, pending)
 		ns.dead.Store(true)
 		ns.router.evictStreamer(ns.TargetIP, ns)
 		ns.callbackMap.FailAll(ns.router, errCode)
+		ns.closeTransport()
+	})
+}
+
+func (ns *NodeStreamer) closeTransport() {
+	ns.closeOnce.Do(func() {
+		log.Printf("[Streamer %s] Closing transport", ns.TargetIP)
 		ns.cancel()
+		_ = ns.stream.CloseSend()
+		_ = ns.grpcConn.Close()
 	})
 }

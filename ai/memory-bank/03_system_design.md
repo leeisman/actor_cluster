@@ -13,7 +13,7 @@
 ├── pkg/                       # 「無外部 Actor 框架」的核心原始碼 (僅引入 gRPC/etcd/DB 等必備驅動)
 │   ├── actor/                 # 極薄 Actor runtime：MPSC Mailbox、單 goroutine callback、ResultSink emit
 │   ├── discovery/             # 服務發現與槽位運算層：etcd 監聽實作與 Slot 映射介面
-│   ├── persistence/           # DB 儲存層：Cassandra Event 讀寫控制器與 MySQL 快照操作
+│   ├── persistence/           # DB 儲存層：Cassandra Event 讀寫 primitive 與 Snapshot 行讀寫
 │   ├── remote/                # 網路通訊層：gRPC protobuf 與 Node 端 transport adapter
 │   └── utils/                 # 極限效能工具包：`sync.Pool` 封裝、無鎖(Lock-Free)結構等
 ├── internal/                  # 專案私有代碼，存放 Node runtime 與測試輔助

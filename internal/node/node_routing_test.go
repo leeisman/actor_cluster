@@ -54,7 +54,7 @@ func TestNode_ConcurrentStreams_ReplyToCorrectBatchSender(t *testing.T) {
 		snapshot: &snapshotRow{balance: 0, lastVersion: 0},
 		events:   nil,
 	}
-	n := NewNode(store, &staticResolver{ip: myIP}, myIP)
+	n := NewNode(store, &staticResolver{ip: myIP}, myIP, Config{})
 	defer n.Stop()
 
 	ctx := context.Background()

@@ -318,7 +318,7 @@ func mapErrorToHTTPStatus(errCode string) int {
 		return http.StatusGatewayTimeout
 	case remote.ErrInsufficientFunds, remote.ErrInvalidPayload:
 		return http.StatusBadRequest
-	case remote.ErrWrongNode, remote.ErrDiscovery, remote.ErrConnection, remote.ErrTransportClosed, remote.ErrStreamInterrupted:
+	case remote.ErrWrongNode, remote.ErrDiscovery, remote.ErrConnection, remote.ErrTransportClosed, remote.ErrStreamInterrupted, remote.ErrNodeOverloaded:
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError

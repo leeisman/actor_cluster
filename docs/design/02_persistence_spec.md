@@ -102,7 +102,7 @@ pkg/persistence
 ```text
 cmd/node
   -> persistence.NewCassandraStore(hosts, keyspace)
-  -> node.NewNode(store, resolver, resolvedIP)
+  -> node.NewNode(store, resolver, resolvedIP, node.Config{MailboxLimit: ...})
   -> remote.NewServer(appNode, cfg)   // cfg 含 remote.ServerConfig，main 內 MaxBatchSize: 5000（與 04_remote_spec 對齊）
   -> pb.RegisterActorServiceServer(grpcServer, remoteServer)
 ```

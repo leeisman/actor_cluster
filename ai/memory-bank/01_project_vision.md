@@ -13,7 +13,7 @@
 
 我們將構建一個基於 **Actor 模型與 Event Sourcing架構** 的底層框架，具備以下特性：
 1. **極致效能與無鎖設計**：核心調度機制將揚棄傳統 Mutex 與 Go 原生 Channel（於熱點路徑），改採 MPSC (Multi-Producer Single-Consumer) Queue 與無鎖操作，榨乾硬體效能。
-2. **高可用與容錯力**：結合 Cassandra 作為不可變的 Event Store，並利用 Snapshot（如 MySQL）實現快速的狀態重建 (Rehydration/Replay)。
+2. **高可用與容錯力**：結合 Cassandra 作為不可變的 Event Store，並利用 Cassandra 內的 Snapshot 行資料實現快速的狀態重建 (Rehydration/Replay)。
 3. **無縫水平擴展**：具備位置透明性 (Location Transparency) 的 Cluster Sharding，無縫整合至 Kubernetes 中，隨流量波動靈活增減節點。
 
 ## 📈 成功指標 (Success Metrics)

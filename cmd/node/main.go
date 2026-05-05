@@ -74,6 +74,7 @@ func main() {
 	keyspace := flag.String("keyspace", "wallet", "Cassandra keyspace")
 	etcdEndpoints := flag.String("etcd", "127.0.0.1:2379", "comma-separated etcd endpoints")
 	nodePrefix := flag.String("node-prefix", "/actor_cluster/nodes", "etcd key prefix for node registration")
+	mailboxLimit := flag.Uint64("mailbox-limit", 1500000, "node-level actor mailbox backlog limit before rejecting new requests")
 	flag.Parse()
 
 	log.Println("Starting Actor Node...")
@@ -132,7 +133,9 @@ func main() {
 	log.Println("Topology resolver started.")
 
 	// ── 5. Actor Node Runtime ───────────────────────────────────────────────
-	appNode := node.NewNode(store, etcdResolver, resolvedIP)
+	appNode := node.NewNode(store, etcdResolver, resolvedIP, node.Config{
+		MailboxLimit: *mailboxLimit,
+	})
 
 	// ── 6. gRPC Server ──────────────────────────────────────────────────────
 	lis, err := net.Listen("tcp", *port)

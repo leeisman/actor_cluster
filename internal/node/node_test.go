@@ -53,7 +53,7 @@ func (s *recordingBatchSender) waitResult(t *testing.T) *pb.RemoteResult {
 func TestNodeHandleBatch_RejectsMissingRequestID(t *testing.T) {
 	t.Parallel()
 
-	n := NewNode(&mockStore{}, nil, "")
+	n := NewNode(&mockStore{}, nil, "", Config{})
 	defer n.Stop()
 
 	sender := newRecordingBatchSender()
@@ -80,7 +80,7 @@ func TestNodeHandleBatch_RejectsMissingRequestID(t *testing.T) {
 func TestNodeHandleBatch_WrongNodeUsesStableErrorCode(t *testing.T) {
 	t.Parallel()
 
-	n := NewNode(&mockStore{}, &stubResolver{ip: "10.0.0.2:50051"}, "10.0.0.1:50051")
+	n := NewNode(&mockStore{}, &stubResolver{ip: "10.0.0.2:50051"}, "10.0.0.1:50051", Config{})
 	defer n.Stop()
 
 	sender := newRecordingBatchSender()
@@ -103,5 +103,37 @@ func TestNodeHandleBatch_WrongNodeUsesStableErrorCode(t *testing.T) {
 	}
 	if res.OpCode != 7 {
 		t.Fatalf("expected op_code to be preserved, got %d", res.OpCode)
+	}
+}
+
+func TestNodeHandleBatch_RejectsWhenMailboxBacklogLimitReached(t *testing.T) {
+	n := NewNode(&mockStore{}, nil, "", Config{
+		MailboxLimit: 1,
+		mailboxPendingFn: func() uint64 {
+			return 1
+		},
+	})
+	defer n.Stop()
+
+	sender := newRecordingBatchSender()
+	err := n.HandleBatch(context.Background(), &pb.BatchRequest{
+		Envelopes: []*pb.RemoteEnvelope{{
+			TenantId:  1,
+			Uid:       42,
+			TxId:      "tx-overload",
+			RequestId: 100,
+			OpCode:    7,
+		}},
+	}, sender)
+	if err != nil {
+		t.Fatalf("HandleBatch returned error: %v", err)
+	}
+
+	res := sender.waitResult(t)
+	if res.ErrorCode != remote.ErrNodeOverloaded {
+		t.Fatalf("expected error_code=%s, got %s", remote.ErrNodeOverloaded, res.ErrorCode)
+	}
+	if res.Success {
+		t.Fatalf("expected failure result, got success: %+v", res)
 	}
 }

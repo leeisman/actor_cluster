@@ -17,6 +17,7 @@ const (
 	ErrActorUnavailable  = "ERR_ACTOR_UNAVAILABLE"  // Actor 無法接受訊息（如尚未就緒；預留）
 	ErrPayloadTooLarge   = "ERR_PAYLOAD_TOO_LARGE"  // 單筆 payload 超過上層硬上限（與傳輸層分開）
 	ErrRehydrationFailed = "ERR_REHYDRATION_FAILED" // 自 Cassandra 還原 Actor 狀態失敗
+	ErrNodeOverloaded    = "ERR_NODE_OVERLOADED"    // node 級 mailbox backlog 已達上限，拒絕再 enqueue
 
 	// 業務（wallet 節點示例）：在 RemoteResult 中與上列同一欄位
 	ErrInvalidPayload    = "ERR_INVALID_PAYLOAD"    // 例如 payload 長度或格式不合法

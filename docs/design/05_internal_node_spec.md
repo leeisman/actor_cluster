@@ -62,6 +62,8 @@ type Node struct {
     myIP     string                      // 本節點對外廣播的 host:port
     replyRoutes sync.Map                // (tenant,uid,request_id) -> 該筆所屬 gRPC stream 的 BatchSender（多 client 併發時不可使用單一 sender 欄位覆寫）
     resultCh chan queuedResult          // MPSC：每筆帶回傳目標 stream；aggregator 依 BatchSender 分組打 BatchResponse
+    mailboxLimit   uint64               // node 級 mailbox backlog 上限；超過即拒絕新請求
+    mailboxPending func() uint64        // 預設為 actor.ProcessMailboxPending；測試可覆寫
     done     chan struct{}
     wg       sync.WaitGroup
 }
@@ -91,6 +93,10 @@ type BusinessActor struct {
 
 ```
 for each env in BatchRequest.Envelopes:
+  0. batch-level overload gate：
+     → 若 mailboxPending() >= mailboxLimit
+       → 整個 BatchRequest 直接回 `ERR_NODE_OVERLOADED`
+       → 不再進入 actor 路由 / shard lock / rehydrate / enqueue
   1. 基礎驗證（TenantID / UID / TxID 非空）
   2. O(1) 所有權防護：resolver.GetNodeIP(env.TenantId, env.Uid)
      → 若非本節點：forceKillLocalActor + Emit(`ERR_WRONG_NODE`) + continue
@@ -99,6 +105,21 @@ for each env in BatchRequest.Envelopes:
   5. core.Send(env)                   // 直接傳入 *pb.RemoteEnvelope，無 actor.Message 中間轉換
      → 若 false（passivation Race）：Lock → delete stale ref → goto retry
 ```
+
+### 4.1.1 Node-Level Overload Gate
+
+第一版高可用保護不做無界堆積，而是在 `HandleBatch` 入口加上 node 級 backlog 上限。
+
+- 依 `actor.ProcessMailboxPending()` 觀察目前整個 node process 的 actor mailbox pending 總量
+- 當 pending 已達 `mailboxLimit` 時：
+  - 整個 `BatchRequest` 快速回 `ERR_NODE_OVERLOADED`
+  - 不再 enqueue 該批任何 Envelope
+  - 由上層（gateway / client）依 `request_id` / `tx_id` 決定是否 retry
+
+設計目的：
+
+- 避免 response path 受阻時，actor mailbox 無上限膨脹，最終導致 `OOMKilled`
+- 讓 overload 以可觀測、可重試的錯誤形式顯性化，而不是等到 process crash 才暴露
 
 ### 4.2 Rehydrate（兩段式冷啟動）
 
@@ -205,7 +226,7 @@ resolveMyIP（--ip 優先 → POD_IP env → UDP 探測網卡）
   → etcd Client
   → EtcdRegistry.Register(ctx, resolvedIP)   // ephemeral key，背景 keepalive；ctx 感知 SIGTERM
   → EtcdResolver.Watch(ctx)                  // 同步 snapshot + 背景 watchLoop；ctx 感知 SIGTERM；內部 tab.Store 建表
-  → node.NewNode(store, resolver, resolvedIP)
+  → node.NewNode(store, resolver, resolvedIP, Config{MailboxLimit: ...})
   → grpcServer.Serve()
   → wait SIGINT/SIGTERM（signal.NotifyContext）
     → registry.Deregister()         // 主動刪 etcd key，立即觸發其他節點 watch，加速路由切換
@@ -235,3 +256,5 @@ resolveMyIP（--ip 優先 → POD_IP env → UDP 探測網卡）
 7. **forceKill 不能在 Lock 內呼叫 Stop()**：Stop() 等 Actor 執行完最後一筆 Handle（含 Cassandra write），若在鎖內呼叫會導致整個 Shard 被 I/O 延遲卡死。
 
 8. **Drain() 必須等 IsDead()**：Stop() 是非阻塞的，goroutine 仍在執行最後的 Handle。只有 `IsDead() == true`（statusDead 已設定）才能安全遍歷 MPSC 鏈結串列。
+
+9. **mailbox 不可無界堆積到 OOM 才發現**：`HandleBatch` 入口應有 node 級 overload gate；超過 backlog 上限時回 `ERR_NODE_OVERLOADED`，而不是繼續 enqueue 直到 process 被 kubelet 殺掉。

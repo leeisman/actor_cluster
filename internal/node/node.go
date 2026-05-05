@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/frankieli/actor_cluster/pkg/actor"
 	"github.com/frankieli/actor_cluster/pkg/discovery"
 	"github.com/frankieli/actor_cluster/pkg/persistence"
 	"github.com/frankieli/actor_cluster/pkg/remote"
@@ -26,6 +27,15 @@ type resultRouteKey struct {
 type queuedResult struct {
 	res   *pb.RemoteResult
 	reply remote.BatchSender
+}
+
+const defaultMailboxLimit uint64 = 1500000
+
+type Config struct {
+	MailboxLimit uint64
+
+	// mailboxPendingFn 僅供測試覆寫；正式環境預設為 actor.ProcessMailboxPending。
+	mailboxPendingFn func() uint64
 }
 
 // ActorKey uniquely identifies an actor.
@@ -66,6 +76,10 @@ type Node struct {
 	// resultCh 是 MPSC 結果佇列：多個 Actor goroutine 寫入，單一 aggregatorLoop 讀取；每筆帶有回傳目標 stream。
 	resultCh chan queuedResult
 
+	// mailboxLimit 是 node 級 backlog 上限；超過時直接拒絕新請求，不再 enqueue 到 actor mailbox。
+	mailboxLimit   uint64
+	mailboxPending func() uint64
+
 	// done 信號所有背景 loop 在 Stop 時退出。
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -74,13 +88,24 @@ type Node struct {
 // NewNode 建構 Node 並啟動背景 goroutine。
 //
 // resolver 傳 nil 可跳過所有權防護（適用於單節點或測試情境）。
-func NewNode(store persistence.Store, resolver discovery.TopologyResolver, myIP string) *Node {
+func NewNode(store persistence.Store, resolver discovery.TopologyResolver, myIP string, cfg Config) *Node {
+	mailboxLimit := cfg.MailboxLimit
+	if mailboxLimit == 0 {
+		mailboxLimit = defaultMailboxLimit
+	}
+	mailboxPendingFn := cfg.mailboxPendingFn
+	if mailboxPendingFn == nil {
+		mailboxPendingFn = actor.ProcessMailboxPending
+	}
+
 	n := &Node{
-		store:    store,
-		resolver: resolver,
-		myIP:     myIP,
-		resultCh: make(chan queuedResult, 10000),
-		done:     make(chan struct{}),
+		store:          store,
+		resolver:       resolver,
+		myIP:           myIP,
+		resultCh:       make(chan queuedResult, 10000),
+		mailboxLimit:   mailboxLimit,
+		mailboxPending: mailboxPendingFn,
+		done:           make(chan struct{}),
 	}
 	for i := 0; i < 256; i++ {
 		n.shards[i].actors = make(map[ActorKey]*BusinessActor)
@@ -134,6 +159,25 @@ func (n *Node) Stop() {
 
 // HandleBatch 接收一批 Envelope，通過所有權檢查後派發給對應 Actor。
 func (n *Node) HandleBatch(ctx context.Context, batch *pb.BatchRequest, sender remote.BatchSender) error {
+	if n.mailboxPending() >= n.mailboxLimit {
+		for _, env := range batch.Envelopes {
+			if env == nil {
+				continue
+			}
+			n.enqueueResult(sender, &pb.RemoteResult{
+				TenantId:  env.TenantId,
+				Uid:       env.Uid,
+				RequestId: env.RequestId,
+				TxId:      env.TxId,
+				Success:   false,
+				OpCode:    env.OpCode,
+				ErrorCode: remote.ErrNodeOverloaded,
+				ErrorMsg:  "node mailbox backlog limit reached, please retry",
+			})
+		}
+		return nil
+	}
+
 	for _, env := range batch.Envelopes {
 		if env.TenantId == 0 || env.Uid == 0 || env.TxId == "" || env.RequestId == 0 {
 			n.enqueueResult(sender, &pb.RemoteResult{

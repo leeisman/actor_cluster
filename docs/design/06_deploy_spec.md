@@ -257,6 +257,8 @@ Actor Node 若要順利融入 K8s 環境，其 Manifest 必須滿足以下工程
    - 雖然 baseline 原則是不先大量主導 app 埋點，但目前 `actor-node` 已額外提供：
      - `node_actor_mailbox_pending`
    - 這個值代表 **單一 node process 內所有 actor mailbox 的 pending envelope 總量**，用來觀察壓測下 actor backlog 是否升高、以及停止送流量後是否回落。
+   - `cmd/node` 目前另有 `--mailbox-limit`（預設 `1500000`）作為第一版 node 級 overload gate；
+     當 mailbox backlog 已達上限時，node 會直接回 `ERR_NODE_OVERLOADED`，避免無界堆積最終導致 OOM。
 
 ### 4.9 避坑紀錄
 

@@ -479,7 +479,7 @@ Request:
 - `Total Completion Duration`
 - `Offered TPS`
 - `Completed TPS`
-- `Callback Map Pending`
+- `Pending Callbacks (total)`
 - `Drain Complete`
 - `InFlight Unfinished`
 
@@ -490,6 +490,7 @@ Request:
     - `tps`
     - `concurrency`
     - `batch`
+    - `flush_delay`
     - `duration`
     - `drain_window`
     - `uid_range`
@@ -516,6 +517,33 @@ Request:
 - 當 `Drain Complete = true` 時，`Completed TPS` 可視為「這批 workload 被完整消化後的吞吐量」
 - 當 `Drain Complete = false` 時，`Completed TPS` 只代表「在 drain window 內已完成部分的平均吞吐量」，**不是最終完整吞吐量**
 - `InFlight Unfinished > 0` 時，表示仍有 request 未完成；這些未完成請求不會被算進 `total_success`
+- `Pending Callbacks (total)` 的語意比 `InFlight` 更寬：
+  - `InFlight`
+    - 只代表已成功送上 wire、但尚未以 success / error 收斂的 request
+  - `Pending Callbacks (total)`
+    - 包含已送上 wire 等待 response 的 request
+    - 也可能包含仍卡在 client batching / streamer pipeline 中、尚未真正送出的 request
+
+### 7.5 壓測判讀指南
+
+常見現象與優先懷疑方向：
+
+- `node_actor_mailbox_pending` 持續上升，最後平滑下降回 `0`
+  - actor 端形成 backlog，但系統仍能正常排空
+- `node_actor_mailbox_pending` 衝高後直接歸 `0`
+  - 優先懷疑 node process restart / `OOMKilled`
+- `Handle Avg (ms)` 與 `Persistence Write Avg (ms)` 幾乎重疊
+  - `Handle()` 成本主要由 Cassandra `ExecuteBatch()` 主導
+- `Handle - Persistence Gap (ms)` 長期接近 `0`
+  - actor business logic 的額外成本相對小，主成本仍在 persistence
+- `Offered TPS` 明顯高於 `Completed TPS`，但 `Drain Complete = true`
+  - generation 階段堆積了 backlog，但在停止送流量後仍可完整排空
+- `Pending Callbacks (total)` 很高，但 `node_actor_mailbox_pending` 很低
+  - 優先懷疑 client / transport / completion path，而非 actor mailbox 本身
+- `ERR_TRANSPORT_CLOSED`、`ERR_DISCOVERY`、`connection reset by peer`
+  - 優先懷疑 transport / streamer lifecycle / node availability
+- `ERR_PERSISTENCE_FAILED`、`gocql: no hosts available in the pool`
+  - 優先懷疑 Cassandra availability / storage health
 
 ## 8. 工程規則與避坑
 

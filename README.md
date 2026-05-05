@@ -192,8 +192,9 @@ Key fields in the final summary:
   - `true` means all in-flight requests finished within the configured drain window.
 - `InFlight Unfinished`
   - Remaining requests not completed before the drain window expired.
-- `Callback Map Pending`
-  - Client-side pending callbacks still waiting for completion.
+- `Pending Callbacks (total)`
+  - Client-side total pending callbacks.
+  - This is broader than `InFlight`: it may include requests already sent on wire and requests still queued in the client batching / streamer pipeline.
 
 Common knobs:
 
@@ -212,6 +213,27 @@ Interpretation notes:
 - If `Drain Complete=false`, `Completed TPS` is only the throughput of the portion that completed within the drain window; it is **not** the final full-consumption throughput.
 - `UID_MIN` / `UID_MAX` matter: a small UID range creates a hot-spot workload, while a larger range spreads pressure across more actors.
 - Local results will vary with kind / Docker Desktop resources and Cassandra health, so the README intentionally documents **how to measure** rather than promising one fixed TPS number.
+
+Quick diagnosis guide:
+
+- `node_actor_mailbox_pending` rises steadily, then slowly returns to `0`
+  - The node is forming actor backlog, but it is still draining normally.
+- `node_actor_mailbox_pending` spikes high and then drops directly to `0`
+  - Strongly suspect `actor-node` restart / `OOMKilled`; a normal drain should usually slope back down instead of hard-resetting.
+- `Handle Avg (ms)` is nearly identical to `Persistence Write Avg (ms)`
+  - `Handle()` cost is dominated by Cassandra `ExecuteBatch()`.
+- `Handle - Persistence Gap (ms)` stays near `0`
+  - There is very little extra work inside `Handle()` beyond persistence.
+- `Offered TPS` is much higher than `Completed TPS`, but `Drain Complete=true`
+  - The system is overloaded during generation, but it can still fully drain after traffic stops.
+- `PendingCallbacks(total)` is high while mailbox backlog stays low
+  - Pressure is likely in the client / transport / completion path, not necessarily inside actor mailboxes.
+- `ERR_TRANSPORT_CLOSED`, `ERR_DISCOVERY`, or `connection reset by peer`
+  - Treat these as transport / node-availability problems first, not pure actor throughput regressions.
+- `ERR_PERSISTENCE_FAILED` or `gocql: no hosts available in the pool`
+  - Cassandra availability or storage health is the primary suspect.
+- `ERR_NODE_OVERLOADED`
+  - The node-level mailbox backlog gate rejected new requests to avoid unbounded actor mailbox growth and OOM.
 
 ### Monitoring baseline (Prometheus / Grafana)
 
